@@ -78,9 +78,13 @@ export class OrderQueue {
     }
   }
 
-  updateOrderSize = (order: Order, size: number): void => {
+  updateOrderSize = (
+    order: Order,
+    size: number,
+    now: number = Date.now()
+  ): void => {
     this._volume += size - order.size // update volume
     order.size = size
-    order.time = Date.now()
+    order.time = now
   }
 }

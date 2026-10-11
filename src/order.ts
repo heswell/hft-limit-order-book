@@ -20,6 +20,8 @@ export class Order {
   private _price: number
   private _time: number
   private readonly _isMaker: boolean
+  private readonly _owner?: unknown
+  private readonly _meta?: unknown
   constructor (
     orderId: string,
     side: Side,
@@ -27,7 +29,9 @@ export class Order {
     price: number,
     time?: number,
     isMaker?: boolean,
-    origSize?: number
+    origSize?: number,
+    owner?: unknown,
+    meta?: unknown
   ) {
     this._id = orderId
     this._side = side
@@ -36,6 +40,18 @@ export class Order {
     this._origSize = origSize ?? size
     this._time = time ?? Date.now()
     this._isMaker = isMaker ?? false
+    this._owner = owner
+    this._meta = meta
+  }
+
+  // Getter for the opaque owner passed through from order creation
+  get owner (): unknown {
+    return this._owner
+  }
+
+  // Getter for the opaque metadata passed through from order creation
+  get meta (): unknown {
+    return this._meta
   }
 
   // Getter for order ID
@@ -103,13 +119,18 @@ export class Order {
     JSON.stringify(this.toObject())
 
   // This method returns an object representation of the order
-  toObject = (): IOrder => ({
-    id: this._id,
-    side: this._side,
-    origSize: this._origSize,
-    size: this._size,
-    price: this._price,
-    time: this._time,
-    isMaker: this._isMaker
-  })
+  toObject = (): IOrder => {
+    const o: IOrder = {
+      id: this._id,
+      side: this._side,
+      origSize: this._origSize,
+      size: this._size,
+      price: this._price,
+      time: this._time,
+      isMaker: this._isMaker
+    }
+    if (this._owner !== undefined) o.owner = this._owner
+    if (this._meta !== undefined) o.meta = this._meta
+    return o
+  }
 }

@@ -56,15 +56,52 @@ const lob = new OrderBook()
 Then you'll be able to use next primary functions:
 
 ```js
-lob.createOrder(type: 'limit' | 'market', side: 'buy' | 'sell', size: number, price: number, orderID: string)
+lob.createOrder(type: 'limit' | 'market', side: 'buy' | 'sell', size: number, price?: number, orderID?: string, timeInForce?: 'GTC' | 'IOC' | 'FOK', extras?: { owner?, meta?, postOnly? })
 
-lob.limit(side: 'buy' | 'sell', orderID: string, size: number, price: number)
+lob.limit(side: 'buy' | 'sell', orderID: string, size: number, price: number, timeInForce?: 'GTC' | 'IOC' | 'FOK', extras?: { owner?, meta?, postOnly? })
 
-lob.market(side: 'buy' | 'sell', size: number)
+lob.market(side: 'buy' | 'sell', size: number, orderID?: string, extras?: { owner?, meta? })
 
 lob.modify(orderID: string, { side: 'buy' | 'sell', size: number, price: number })
 
 lob.cancel(orderID: string)
+
+lob.depth(levels?: number)          // [asks, bids] as [price, size][], best first
+
+lob.depthDetailed(levels?: number)  // [asks, bids] as { price, size, count }[], best first
+```
+
+### Trades, sequence numbers, owner and metadata
+
+Every processed order (`limit`, `market`, `createOrder`, `modify`) returns, in addition to the
+original fields, `trades: Trade[]` (the executions in match order) and `seq` (the book sequence
+number assigned to the operation).
+
+```ts
+interface Trade {
+  tradeId: string        // unique per book
+  makerOrderId: string   // resting order
+  takerOrderId: string   // incoming order (caller supplied id for market orders, otherwise generated)
+  side: 'buy' | 'sell'   // aggressor side
+  price: number          // maker price
+  size: number
+  timestamp: number      // from the book clock
+  seq: number            // monotonic per book, shared with operation seq numbers
+  makerOwner?: unknown; takerOwner?: unknown
+  makerMeta?: unknown;  takerMeta?: unknown
+}
+```
+
+`owner` and `meta` are opaque values passed through to the stored `Order` (`order.owner`,
+`order.meta`, `toObject()`), snapshots, and trades. A `postOnly` limit order that would match
+immediately is rejected with `err` set and nothing is traded or rested. `lob.seq` returns the latest sequence number; it is also saved in snapshots.
+Orders rejected with `err` do not consume a sequence number.
+
+```js
+const lob = new OrderBook({ onTrade: (t) => console.log(t) })
+lob.limit('sell', 'ask1', 5, 100, 'GTC', { owner: 'bot-1' })
+const res = lob.market('buy', 2, 'my-market-id', { owner: 'bot-2' })
+res.trades // [{ makerOrderId: 'ask1', takerOrderId: 'my-market-id', price: 100, size: 2, ... }]
 ```
 
 ## About primary functions
@@ -256,6 +293,12 @@ bids: 90  -> 5      90  -> 5
 ## Options
 
 The orderbook can be initialized with the following options by passing them to the constructor:
+
+### Clock
+`clock?: () => number` replaces `Date.now()` for all timestamps (order times, trades, journal logs, snapshots), which makes simulations and tests deterministic.
+
+### onTrade
+`onTrade?: (trade: Trade) => void` is called once per execution, in order, after the triggering operation has been applied to the book. It is not called while replaying a journal.
 
 ### Snapshot
 A `snapshot` represents the state of the order book at a specific point in time. It includes the following properties:

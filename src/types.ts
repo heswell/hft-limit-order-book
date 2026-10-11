@@ -15,8 +15,63 @@ export interface IProcessOrder {
   quantityLeft: number
   /** The error encountered during order processing, if any. */
   err: Error | null
+  /** Executions generated while processing the order, in match order. */
+  trades: Trade[]
+  /** Book sequence number assigned to this operation. */
+  seq: number
   /** Optional journal log entry related to the order processing. */
   log?: JournalLog
+}
+
+/**
+ * A single execution between a resting (maker) and an incoming (taker) order.
+ */
+export interface Trade {
+  /** Unique (per book) trade identifier. */
+  tradeId: string
+  /** Id of the resting order. */
+  makerOrderId: string
+  /** Id of the incoming order. */
+  takerOrderId: string
+  /** Aggressor side (side of the taker). */
+  side: Side
+  /** Execution price (the maker's price). */
+  price: number
+  /** Executed size. */
+  size: number
+  /** Time of execution, from the book clock. */
+  timestamp: number
+  /** Monotonic per-book sequence number. */
+  seq: number
+  /** Opaque owner of the maker order. */
+  makerOwner?: unknown
+  /** Opaque owner of the taker order. */
+  takerOwner?: unknown
+  /** Opaque metadata of the maker order. */
+  makerMeta?: unknown
+  /** Opaque metadata of the taker order. */
+  takerMeta?: unknown
+}
+
+/** Optional extras accepted by market orders. */
+export interface OrderExtras {
+  /** Opaque owner, carried to orders, snapshots and trades. */
+  owner?: unknown
+  /** Opaque metadata, carried to orders, snapshots and trades. */
+  meta?: unknown
+}
+
+/** Optional extras accepted by limit orders. */
+export interface LimitOrderExtras extends OrderExtras {
+  /** Reject the order (with an error) if it would match immediately. */
+  postOnly?: boolean
+}
+
+/** A price level with its total size and number of orders. */
+export interface DepthLevel {
+  price: number
+  size: number
+  count: number
 }
 
 /**
@@ -101,6 +156,10 @@ export interface MarketOrderOptions {
   side: Side
   /** Size of the order. */
   size: number
+  /** Identifier of the order (generated if not supplied). */
+  orderID?: string
+  owner?: unknown
+  meta?: unknown
 }
 
 /**
@@ -117,6 +176,9 @@ export interface LimitOrderOptions {
   price: number
   /** Time in force policy for the order. */
   timeInForce: TimeInForce
+  postOnly?: boolean
+  owner?: unknown
+  meta?: unknown
 }
 
 /**
@@ -150,6 +212,10 @@ export interface OrderBookOptions {
   enableJournaling?: boolean
   /** Array of journal logs. */
   journal?: JournalLog[]
+  /** Time source used for orders, trades, journal and snapshots. Defaults to `Date.now`. */
+  clock?: () => number
+  /** Invoked synchronously for every trade, after the triggering operation has been applied. */
+  onTrade?: (trade: Trade) => void
 }
 
 /**
@@ -170,6 +236,10 @@ export interface IOrder {
   time: number
   /** Flag to indicate if the order is a maker order. */
   isMaker: boolean
+  /** Opaque owner of the order. */
+  owner?: unknown
+  /** Opaque metadata of the order. */
+  meta?: unknown
 }
 
 /**
@@ -214,4 +284,6 @@ export interface Snapshot {
   ts: number
   /** The id of the last operation inserted in the orderbook */
   lastOp: number
+  /** Book sequence number at snapshot time */
+  seq?: number
 }

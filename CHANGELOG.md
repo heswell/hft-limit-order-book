@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* `trades` array and `seq` on every process result; optional `onTrade` callback
+* caller supplied (or generated) `id` for market orders
+* injectable `clock` option used for all timestamps
+* opaque `owner`/`meta` on orders, snapshots and trades
+* `depth(levels?)` and new `depthDetailed(levels?)` returning `{ price, size, count }`
+* `postOnly` limit orders
+* monotonic per-book `seq` (also stored in snapshots)
+* export `Order`, `OrderType`, `TimeInForce`, `Side` and types from the package index
+
 ## [5.0.0](https://github.com/fasenderos/hft-limit-order-book/compare/v4.0.0...v5.0.0) (2024-06-19)
 
 

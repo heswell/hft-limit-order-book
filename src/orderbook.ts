@@ -4,20 +4,36 @@ import { OrderQueue } from './orderqueue'
 import { OrderSide } from './orderside'
 import { Side } from './side'
 import type {
+  DepthLevel,
   ICancelOrder,
   IProcessOrder,
   JournalLog,
+  LimitOrderExtras,
   OrderBookOptions,
+  OrderExtras,
   OrderUpdatePrice,
   OrderUpdateSize,
-  Snapshot
+  Snapshot,
+  Trade
 } from './types'
 
 const validTimeInForce = Object.values(TimeInForce)
 
+interface Taker {
+  id: string
+  side: Side
+  owner?: unknown
+  meta?: unknown
+}
+
 export class OrderBook {
   private orders: { [key: string]: Order } = {}
   private _lastOp: number = 0
+  private _seq: number = 0
+  private _tradeCount: number = 0
+  private _replaying: boolean = false // eslint-disable-line @typescript-eslint/prefer-readonly
+  private readonly clock: () => number
+  private readonly onTrade?: (trade: Trade) => void
   private readonly bids: OrderSide
   private readonly asks: OrderSide
   private readonly enableJournaling: boolean
@@ -27,14 +43,20 @@ export class OrderBook {
    * @param {JournalLog} [options.snapshot] - The orderbook snapshot will be restored before processing any journal logs, if any.
    * @param {JournalLog} [options.journal] - Array of journal logs (optional).
    * @param {boolean} [options.enableJournaling=false] - Flag to enable journaling. Default to false
+   * @param {() => number} [options.clock=Date.now] - Time source used everywhere a timestamp is needed.
+   * @param {(trade: Trade) => void} [options.onTrade] - Called for every execution.
    */
   constructor ({
     snapshot,
     journal,
-    enableJournaling = false
+    enableJournaling = false,
+    clock = Date.now,
+    onTrade
   }: OrderBookOptions = {}) {
-    this.bids = new OrderSide(Side.BUY)
-    this.asks = new OrderSide(Side.SELL)
+    this.clock = clock
+    this.onTrade = onTrade
+    this.bids = new OrderSide(Side.BUY, clock)
+    this.asks = new OrderSide(Side.SELL, clock)
     this.enableJournaling = enableJournaling
     // First restore from orderbook snapshot
     if (snapshot != null) {
@@ -47,8 +69,18 @@ export class OrderBook {
       if (snapshot != null && snapshot.lastOp > 0) {
         journal = journal.filter((log) => log.opId > snapshot.lastOp)
       }
-      this.replayJournal(journal)
+      this._replaying = true
+      try {
+        this.replayJournal(journal)
+      } finally {
+        this._replaying = false
+      }
     }
+  }
+
+  /** Monotonic per-book sequence number of the latest operation or trade. */
+  get seq (): number {
+    return this._seq
   }
 
   // Getter for the lastOp
@@ -64,8 +96,9 @@ export class OrderBook {
    *  @param side - `sell` or `buy`
    *  @param size - How much of currency you want to trade in units of base currency
    *  @param price - The price at which the order is to be fullfilled, in units of the quote currency. Param only for limit order
-   *  @param orderID - Unique order ID. Param only for limit order
+   *  @param orderID - Unique order ID. Required for limit orders, optional for market orders (generated if absent)
    *  @param timeInForce - Time-in-force supported are: `GTC` (default), `FOK`, `IOC`. Param only for limit order
+   *  @param extras - Optional `owner`, `meta` and (limit only) `postOnly`
    *  @returns An object with the result of the processed order or an error.
    */
   public createOrder = (
@@ -76,27 +109,27 @@ export class OrderBook {
     // Specific for limit order type
     price?: number,
     orderID?: string,
-    timeInForce: TimeInForce = TimeInForce.GTC
+    timeInForce: TimeInForce = TimeInForce.GTC,
+    // `postOnly` applies to limit orders only
+    extras: LimitOrderExtras = {}
   ): IProcessOrder => {
     switch (type) {
       case OrderType.MARKET:
-        return this.market(side, size)
+        return this.market(side, size, orderID, extras)
       case OrderType.LIMIT:
         return this.limit(
           side,
           orderID as string,
           size,
           price as number,
-          timeInForce
+          timeInForce,
+          extras
         )
-      default:
-        return {
-          done: [],
-          partial: null,
-          partialQuantityProcessed: 0,
-          quantityLeft: size,
-          err: CustomError(ERROR.ErrInvalidOrderType)
-        }
+      default: {
+        const response = this.getProcessOrderResponse(size)
+        response.err = CustomError(ERROR.ErrInvalidOrderType)
+        return response
+      }
     }
   }
 
@@ -106,9 +139,16 @@ export class OrderBook {
    *
    * @param side - `sell` or `buy`
    * @param size - How much of currency you want to trade in units of base currency
+   * @param orderID - Optional caller supplied order ID (generated if absent), reported as `takerOrderId` in trades
+   * @param extras - Optional opaque `owner` and `meta`
    * @returns An object with the result of the processed order or an error
    */
-  public market = (side: Side, size: number): IProcessOrder => {
+  public market = (
+    side: Side,
+    size: number,
+    orderID?: string,
+    extras: OrderExtras = {}
+  ): IProcessOrder => {
     let quantityToTrade = size
     const response = this.getProcessOrderResponse(quantityToTrade)
 
@@ -120,6 +160,21 @@ export class OrderBook {
     if (typeof quantityToTrade !== 'number' || quantityToTrade <= 0) {
       response.err = CustomError(ERROR.ErrInsufficientQuantity)
       return response
+    }
+
+    if (orderID !== undefined && this.orders[orderID] !== undefined) {
+      response.err = CustomError(ERROR.ErrOrderExists)
+      return response
+    }
+
+    const now = this.clock()
+    response.seq = this.nextSeq()
+    const takerId = orderID ?? `mkt-${response.seq}`
+    const taker: Taker = {
+      id: takerId,
+      side,
+      owner: extras.owner,
+      meta: extras.meta
     }
 
     let iter
@@ -136,7 +191,13 @@ export class OrderBook {
       // if sideToProcess.len > 0 it is not necessary to verify that bestPrice exists
       const bestPrice = iter()
       const { done, partial, partialQuantityProcessed, quantityLeft } =
-        this.processQueue(bestPrice as OrderQueue, quantityToTrade)
+        this.processQueue(
+          bestPrice as OrderQueue,
+          quantityToTrade,
+          taker,
+          response.trades,
+          now
+        )
       response.done = response.done.concat(done)
       response.partial = partial
       response.partialQuantityProcessed = partialQuantityProcessed
@@ -146,11 +207,18 @@ export class OrderBook {
     if (this.enableJournaling) {
       response.log = {
         opId: ++this._lastOp,
-        ts: Date.now(),
+        ts: now,
         op: 'm',
-        o: { side, size }
+        o: this.defined({
+          side,
+          size,
+          orderID,
+          owner: extras.owner,
+          meta: extras.meta
+        })
       }
     }
+    this.emitTrades(response.trades)
     return response
   }
 
@@ -163,6 +231,7 @@ export class OrderBook {
    * @param size - How much of currency you want to trade in units of base currency
    * @param price - The price at which the order is to be fullfilled, in units of the quote currency
    * @param timeInForce - Time-in-force type supported are: GTC, FOK, IOC
+   * @param extras - Optional `owner`, `meta` and `postOnly` (reject instead of matching)
    * @returns An object with the result of the processed order or an error
    */
   public limit = (
@@ -170,7 +239,8 @@ export class OrderBook {
     orderID: string,
     size: number,
     price: number,
-    timeInForce: TimeInForce = TimeInForce.GTC
+    timeInForce: TimeInForce = TimeInForce.GTC,
+    extras: LimitOrderExtras = {}
   ): IProcessOrder => {
     const response = this.getProcessOrderResponse(size)
 
@@ -199,15 +269,42 @@ export class OrderBook {
       return response
     }
 
-    this.createLimitOrder(response, side, orderID, size, price, timeInForce)
+    if (extras.postOnly === true && this.wouldCross(side, price)) {
+      response.err = CustomError(ERROR.ErrPostOnlyWouldCross)
+      return response
+    }
+
+    const now = this.clock()
+    response.seq = this.nextSeq()
+    this.createLimitOrder(
+      response,
+      side,
+      orderID,
+      size,
+      price,
+      timeInForce,
+      now,
+      extras.owner,
+      extras.meta
+    )
     if (this.enableJournaling) {
       response.log = {
         opId: ++this._lastOp,
-        ts: Date.now(),
+        ts: now,
         op: 'l',
-        o: { side, orderID, size, price, timeInForce }
+        o: this.defined({
+          side,
+          orderID,
+          size,
+          price,
+          timeInForce,
+          postOnly: extras.postOnly,
+          owner: extras.owner,
+          meta: extras.meta
+        })
       }
     }
+    this.emitTrades(response.trades)
 
     return response
   }
@@ -228,19 +325,17 @@ export class OrderBook {
   ): IProcessOrder => {
     const order = this.orders[orderID]
     if (order === undefined) {
-      return {
-        done: [],
-        partial: null,
-        partialQuantityProcessed: 0,
-        quantityLeft: 0,
-        err: CustomError(ERROR.ErrOrderNotFound)
-      }
+      const response = this.getProcessOrderResponse(0)
+      response.err = CustomError(ERROR.ErrOrderNotFound)
+      return response
     }
     if (orderUpdate?.price !== undefined || orderUpdate?.size !== undefined) {
       const newPrice = orderUpdate.price ?? order.price
       const newSize = orderUpdate.size ?? order.size
       if (newPrice > 0 && newSize > 0) {
         const response = this.getProcessOrderResponse(newSize)
+        const now = this.clock()
+        response.seq = this.nextSeq()
         this._cancelOrder(order.id, true)
         this.createLimitOrder(
           response,
@@ -248,27 +343,27 @@ export class OrderBook {
           order.id,
           newSize,
           newPrice,
-          TimeInForce.GTC
+          TimeInForce.GTC,
+          now,
+          order.owner,
+          order.meta
         )
         if (this.enableJournaling) {
           response.log = {
             opId: ++this._lastOp,
-            ts: Date.now(),
+            ts: now,
             op: 'u',
             o: { orderID, orderUpdate }
           }
         }
+        this.emitTrades(response.trades)
         return response
       }
     }
     // Missing one of price and/or size, or the provided ones are not greater than zero
-    return {
-      done: [],
-      partial: null,
-      partialQuantityProcessed: 0,
-      quantityLeft: orderUpdate?.size ?? 0,
-      err: CustomError(ERROR.ErrInvalidPriceOrQuantity)
-    }
+    const response = this.getProcessOrderResponse(orderUpdate?.size ?? 0)
+    response.err = CustomError(ERROR.ErrInvalidPriceOrQuantity)
+    return response
   }
 
   /**
@@ -291,17 +386,53 @@ export class OrderBook {
     return this.orders[orderID]
   }
 
-  // Returns price levels and volume at price level
-  public depth = (): [Array<[number, number]>, Array<[number, number]>] => {
+  /**
+   * Returns `[price, size]` levels for asks (ascending) and bids (descending), best first.
+   *
+   * @param levels - Optional maximum number of levels returned per side
+   */
+  public depth = (
+    levels?: number
+  ): [Array<[number, number]>, Array<[number, number]>] => {
     const asks: Array<[number, number]> = []
     const bids: Array<[number, number]> = []
-    this.asks.priceTree().forEach((levelPrice: number, level: OrderQueue) => {
-      asks.push([levelPrice, level.volume()])
+    this.collectLevels(this.asks, levels, (price, queue) => {
+      asks.push([price, queue.volume()])
     })
-    this.bids.priceTree().forEach((levelPrice: number, level: OrderQueue) => {
-      bids.push([levelPrice, level.volume()])
+    this.collectLevels(this.bids, levels, (price, queue) => {
+      bids.push([price, queue.volume()])
     })
     return [asks, bids]
+  }
+
+  /**
+   * Like {@link depth} but each level is `{ price, size, count }`, where `count`
+   * is the number of resting orders at the level.
+   */
+  public depthDetailed = (levels?: number): [DepthLevel[], DepthLevel[]] => {
+    const asks: DepthLevel[] = []
+    const bids: DepthLevel[] = []
+    this.collectLevels(this.asks, levels, (price, queue) => {
+      asks.push({ price, size: queue.volume(), count: queue.len() })
+    })
+    this.collectLevels(this.bids, levels, (price, queue) => {
+      bids.push({ price, size: queue.volume(), count: queue.len() })
+    })
+    return [asks, bids]
+  }
+
+  private readonly collectLevels = (
+    side: OrderSide,
+    levels: number | undefined,
+    cb: (price: number, queue: OrderQueue) => void
+  ): void => {
+    if (levels !== undefined && !(levels > 0)) return
+    let n = 0
+    side.priceTree().forEach((price: number, queue: OrderQueue) => {
+      cb(price, queue)
+      n++
+      if (levels !== undefined && n >= levels) return true
+    })
   }
 
   public toString = (): string => {
@@ -363,11 +494,12 @@ export class OrderBook {
     this.asks.priceTree().forEach((price: number, orders: OrderQueue) => {
       asks.push({ price, orders: orders.toArray() })
     })
-    return { bids, asks, ts: Date.now(), lastOp: this._lastOp }
+    return { bids, asks, ts: this.clock(), lastOp: this._lastOp, seq: this._seq }
   }
 
   private readonly restoreSnapshot = (snapshot: Snapshot): void => {
     this._lastOp = snapshot.lastOp
+    this._seq = snapshot.seq ?? 0
     for (const level of snapshot.bids) {
       for (const order of level.orders) {
         this.orders[order.id] = order
@@ -398,7 +530,7 @@ export class OrderBook {
       if (this.enableJournaling) {
         response.log = {
           opId: skipOpInc ? this._lastOp : ++this._lastOp,
-          ts: Date.now(),
+          ts: this.clock(),
           op: 'd',
           o: { orderID }
         }
@@ -413,7 +545,7 @@ export class OrderBook {
     if (this.enableJournaling) {
       response.log = {
         opId: skipOpInc ? this._lastOp : ++this._lastOp,
-        ts: Date.now(),
+        ts: this.clock(),
         op: 'd',
         o: { orderID }
       }
@@ -421,14 +553,43 @@ export class OrderBook {
     return response
   }
 
+  // Drops undefined keys so journal entries stay minimal
+  private readonly defined = <T extends object>(o: T): T => {
+    for (const k of Object.keys(o)) {
+      if ((o as Record<string, unknown>)[k] === undefined) {
+        /* eslint-disable @typescript-eslint/no-dynamic-delete */
+        delete (o as Record<string, unknown>)[k]
+      }
+    }
+    return o
+  }
+
+  private readonly nextSeq = (): number => ++this._seq
+
   private readonly getProcessOrderResponse = (size: number): IProcessOrder => {
     return {
       done: [],
       partial: null,
       partialQuantityProcessed: 0,
       quantityLeft: size,
-      err: null
+      err: null,
+      trades: [],
+      seq: this._seq
     }
+  }
+
+  private readonly emitTrades = (trades: Trade[]): void => {
+    if (this.onTrade === undefined || this._replaying) return
+    for (const trade of trades) this.onTrade(trade)
+  }
+
+  private readonly wouldCross = (side: Side, price: number): boolean => {
+    if (side === Side.BUY) {
+      const best = this.asks.minPriceQueue()
+      return best !== undefined && price >= best.price()
+    }
+    const best = this.bids.maxPriceQueue()
+    return best !== undefined && price <= best.price()
   }
 
   private readonly createLimitOrder = (
@@ -437,8 +598,12 @@ export class OrderBook {
     orderID: string,
     size: number,
     price: number,
-    timeInForce: TimeInForce
+    timeInForce: TimeInForce,
+    now: number,
+    owner?: unknown,
+    meta?: unknown
   ): void => {
+    const taker: Taker = { id: orderID, side, owner, meta }
     let quantityToTrade = size
     let sideToProcess: OrderSide
     let sideToAdd: OrderSide
@@ -473,7 +638,13 @@ export class OrderBook {
       comparator(price, bestPrice.price())
     ) {
       const { done, partial, partialQuantityProcessed, quantityLeft } =
-        this.processQueue(bestPrice, quantityToTrade)
+        this.processQueue(
+          bestPrice,
+          quantityToTrade,
+          taker,
+          response.trades,
+          now
+        )
       response.done = response.done.concat(done)
       response.partial = partial
       response.partialQuantityProcessed = partialQuantityProcessed
@@ -488,8 +659,11 @@ export class OrderBook {
         side,
         quantityToTrade,
         price,
-        Date.now(),
-        true
+        now,
+        true,
+        undefined,
+        owner,
+        meta
       )
       if (response.done.length > 0) {
         response.partialQuantityProcessed = size - quantityToTrade
@@ -512,7 +686,17 @@ export class OrderBook {
       }
 
       response.done.push(
-        new Order(orderID, side, size, totalPrice / totalQuantity, Date.now())
+        new Order(
+          orderID,
+          side,
+          size,
+          totalPrice / totalQuantity,
+          now,
+          false,
+          undefined,
+          owner,
+          meta
+        )
       )
     }
 
@@ -529,7 +713,10 @@ export class OrderBook {
           if (log.o.side == null || log.o.size == null) {
             throw CustomError(ERROR.ErrJournalLog)
           }
-          this.market(log.o.side, log.o.size)
+          this.market(log.o.side, log.o.size, log.o.orderID, {
+            owner: log.o.owner,
+            meta: log.o.meta
+          })
           break
         case 'l':
           if (
@@ -545,7 +732,12 @@ export class OrderBook {
             log.o.orderID,
             log.o.size,
             log.o.price,
-            log.o.timeInForce
+            log.o.timeInForce,
+            {
+              postOnly: log.o.postOnly,
+              owner: log.o.owner,
+              meta: log.o.meta
+            }
           )
           break
         case 'd':
@@ -574,20 +766,36 @@ export class OrderBook {
 
   private readonly processQueue = (
     orderQueue: OrderQueue,
-    quantityToTrade: number
+    quantityToTrade: number,
+    taker: Taker,
+    trades: Trade[],
+    now: number
   ): IProcessOrder => {
-    const response: IProcessOrder = {
-      done: [],
-      partial: null,
-      partialQuantityProcessed: 0,
-      quantityLeft: quantityToTrade,
-      err: null
+    const response = this.getProcessOrderResponse(quantityToTrade)
+    const record = (maker: Order, size: number): void => {
+      const seq = this.nextSeq()
+      const trade: Trade = {
+        tradeId: `t${++this._tradeCount}`,
+        makerOrderId: maker.id,
+        takerOrderId: taker.id,
+        side: taker.side,
+        price: maker.price,
+        size,
+        timestamp: now,
+        seq
+      }
+      if (maker.owner !== undefined) trade.makerOwner = maker.owner
+      if (taker.owner !== undefined) trade.takerOwner = taker.owner
+      if (maker.meta !== undefined) trade.makerMeta = maker.meta
+      if (taker.meta !== undefined) trade.takerMeta = taker.meta
+      trades.push(trade)
     }
     if (response.quantityLeft > 0) {
       while (orderQueue.len() > 0 && response.quantityLeft > 0) {
         const headOrder = orderQueue.head()
         if (headOrder !== undefined) {
           if (response.quantityLeft < headOrder.size) {
+            record(headOrder, response.quantityLeft)
             response.partial = new Order(
               headOrder.id,
               headOrder.side,
@@ -595,13 +803,16 @@ export class OrderBook {
               headOrder.price,
               headOrder.time,
               true,
-              headOrder.origSize
+              headOrder.origSize,
+              headOrder.owner,
+              headOrder.meta
             )
             this.orders[headOrder.id] = response.partial
             response.partialQuantityProcessed = response.quantityLeft
             orderQueue.update(headOrder, response.partial)
             response.quantityLeft = 0
           } else {
+            record(headOrder, headOrder.size)
             response.quantityLeft = response.quantityLeft - headOrder.size
             const canceledOrder = this._cancelOrder(headOrder.id, true)
             /* c8 ignore next unable to test when order is undefined */

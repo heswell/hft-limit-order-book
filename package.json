@@ -1,67 +1,64 @@
 {
-  "name": "hft-limit-order-book",
-  "version": "5.0.0",
+  "name": "nodejs-order-book",
+  "version": "10.1.1",
   "description": "Node.js Lmit Order Book for high-frequency trading (HFT).",
-  "author": "Andrea Fassina <andrea.fassina82@gmail.com>",
+  "author": "Andrea Fassina <fasenderos@gmail.com>",
   "license": "MIT",
-  "homepage": "https://github.com/fasenderos/hft-limit-order-book",
+  "homepage": "https://github.com/fasenderos/nodejs-order-book",
   "repository": {
     "type": "git",
-    "url": "git@github.com:fasenderos/hft-limit-order-book.git"
+    "url": "git@github.com:fasenderos/nodejs-order-book.git"
   },
   "bugs": {
-    "url": "https://github.com/fasenderos/hft-limit-order-book/issues"
+    "url": "https://github.com/fasenderos/nodejs-order-book/issues"
   },
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
-  "umd:main": "dist/umd/index.js",
   "types": "dist/types/index.d.js",
   "scripts": {
-    "addscope": "node tools/packagejson name @fasenderos/hft-limit-order-book",
+    "addscope": "node tools/packagejson name @fasenderos/nodejs-order-book",
     "bench": "node benchmarks/benchmark_lob.js",
-    "build": "npm run build:cjs && npm run build:esm && npm run build:umd && npm run build:types",
+    "build": "npm run build:cjs && npm run build:esm && npm run build:types",
     "build:cjs": "node tools/cleanup cjs && tsc -p config/tsconfig.cjs.json",
     "build:esm": "node tools/cleanup esm && tsc -p config/tsconfig.esm.json",
-    "build:umd": "node tools/cleanup umd && webpack --config config/webpack.config.js",
     "build:types": "node tools/cleanup types && tsc -p config/tsconfig.types.json",
     "clean": "node tools/cleanup",
-    "lint": "ts-standard | snazzy",
-    "lint:fix": "ts-standard --fix | snazzy",
+    "lint": "biome check ./src ./test",
+    "lint:fix": "biome check --write ./src ./test",
     "package": "npm run build && npm pack",
-    "postinstall": "husky install",
     "postpublish": "pinst --enable",
     "prepublishOnly": "pinst --disable",
     "release": "release-it --ci",
+    "release:beta": "release-it --ci --preRelease=beta",
     "release:major": "release-it major --ci",
     "release:minor": "release-it minor --ci",
     "release:patch": "release-it patch --ci",
-    "test": "tap",
-    "test:dev": "tap repl w",
-    "test:cov": "tap && tap report lcov",
-    "prepare": "husky install"
+    "test": "c8 node --import=tsx --test ./test/*.test.ts",
+    "test:dev": "c8 node --import=tsx --test --watch ./test/*.test.ts",
+    "test:ci": "node --import=tsx --test ./test/*.test.ts",
+    "test:cov": "c8 --reporter=lcov node --import=tsx --test ./test/*.test.ts",
+    "prepare": "husky"
   },
   "dependencies": {
     "denque": "2.1.0",
     "functional-red-black-tree": "1.0.1"
   },
   "devDependencies": {
-    "@commitlint/cli": "^19.3.0",
-    "@commitlint/config-conventional": "^18.5.0",
-    "@release-it/conventional-changelog": "^8.0.1",
+    "@biomejs/biome": "^2.5.1",
+    "@commitlint/cli": "^21.1.0",
+    "@commitlint/config-conventional": "^21.1.0",
+    "@release-it/conventional-changelog": "^11.0.1",
     "@types/functional-red-black-tree": "^1.0.6",
-    "gaussian": "^1.0.0",
-    "husky": "^9.0.6",
+    "@types/node": "^26.0.1",
+    "c8": "^11.0.0",
+    "gaussian": "^1.3.0",
+    "husky": "^9.1.7",
     "nanobench": "^3.0.0",
     "pinst": "^3.0.0",
-    "release-it": "^17.0.3",
-    "snazzy": "^9.0.0",
-    "tap": "^19.2.5",
-    "ts-loader": "^9.0.0",
-    "ts-node": "^10.0.0",
-    "ts-standard": "^12.0.0",
-    "typescript": "^5.0.0",
-    "webpack": "^5.0.0",
-    "webpack-cli": "^5.0.0"
+    "release-it": "^20.2.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   },
   "publishConfig": {
     "access": "public"
@@ -70,21 +67,20 @@
     "dist"
   ],
   "keywords": [
+    "order-book",
+    "nodejs-order-book",
+    "orderbook",
+    "limit-order-book",
     "exchange",
     "hft",
     "hft-trading",
-    "limit-order-book",
     "matching-algorithm",
     "matching-engine",
     "nodejs",
-    "orderbook",
-    "order-book",
+    "performance",
+    "low-latency",
+    "trading-algorithm",
     "typescript",
     "trading"
-  ],
-  "ts-standard": {
-    "ignore": [
-      "dist"
-    ]
-  }
+  ]
 }

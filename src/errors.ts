@@ -1,50 +1,88 @@
+/* node:coverage ignore next - Don't know why first and last line of each file count as uncovered */
+import type { IError } from "./types";
+
 export enum ERROR {
-  Default = 'Something wrong',
-  ErrInsufficientQuantity = 'orderbook: insufficient quantity to calculate price',
-  ErrInvalidOrderType = "orderbook: supported order type are 'limit' and 'market'",
-  ErrInvalidPrice = 'orderbook: invalid order price',
-  ErrInvalidPriceLevel = 'orderbook: invalid order price level',
-  ErrInvalidPriceOrQuantity = 'orderbook: invalid order price or quantity',
-  ErrInvalidQuantity = 'orderbook: invalid order quantity',
-  ErrInvalidSide = "orderbook: given neither 'bid' nor 'ask'",
-  ErrInvalidTimeInForce = "orderbook: supported time in force are 'GTC', 'IOC' and 'FOK'",
-  ErrLimitFOKNotFillable = 'orderbook: limit FOK order not fillable',
-  ErrOrderExists = 'orderbook: order already exists',
-  ErrOrderNotFound = 'orderbook: order not found',
-  ErrPostOnlyWouldCross = 'orderbook: post-only order would cross the book',
-  ErrJournalLog = 'journal: invalid journal log format',
+	DEFAULT = "DEFAULT",
+	INSUFFICIENT_QUANTITY = "INSUFFICIENT_QUANTITY",
+	INVALID_CONDITIONAL_ORDER = "INVALID_CONDITIONAL_ORDER",
+	INVALID_JOURNAL_LOG = "INVALID_JOURNAL_LOG",
+	INVALID_ORDER_TYPE = "INVALID_ORDER_TYPE",
+	INVALID_PRICE = "INVALID_PRICE",
+	INVALID_PRICE_LEVEL = "INVALID_PRICE_LEVEL",
+	INVALID_PRICE_OR_QUANTITY = "INVALID_PRICE_OR_QUANTITY",
+	INVALID_QUANTITY = "INVALID_QUANTITY",
+	INVALID_SIDE = "INVALID_SIDE",
+	INVALID_TIF = "INVALID_TIF",
+	LIMIT_ORDER_FOK_NOT_FILLABLE = "LIMIT_ORDER_FOK_NOT_FILLABLE",
+	LIMIT_ORDER_POST_ONLY = "LIMIT_ORDER_POST_ONLY",
+	ORDER_ALREDY_EXISTS = "ORDER_ALREDY_EXISTS",
+	ORDER_NOT_FOUND = "ORDER_NOT_FOUND",
+	STP_TRIGGERED = "STP_TRIGGERED",
 }
 
-export const CustomError = (error?: ERROR | string): Error => {
-  switch (error) {
-    case ERROR.ErrInvalidQuantity:
-      return new Error(ERROR.ErrInvalidQuantity)
-    case ERROR.ErrInsufficientQuantity:
-      return new Error(ERROR.ErrInsufficientQuantity)
-    case ERROR.ErrInvalidPrice:
-      return new Error(ERROR.ErrInvalidPrice)
-    case ERROR.ErrInvalidPriceLevel:
-      return new Error(ERROR.ErrInvalidPriceLevel)
-    case ERROR.ErrInvalidPriceOrQuantity:
-      return new Error(ERROR.ErrInvalidPriceOrQuantity)
-    case ERROR.ErrOrderExists:
-      return new Error(ERROR.ErrOrderExists)
-    case ERROR.ErrOrderNotFound:
-      return new Error(ERROR.ErrOrderNotFound)
-    case ERROR.ErrInvalidSide:
-      return new Error(ERROR.ErrInvalidSide)
-    case ERROR.ErrInvalidOrderType:
-      return new Error(ERROR.ErrInvalidOrderType)
-    case ERROR.ErrInvalidTimeInForce:
-      return new Error(ERROR.ErrInvalidTimeInForce)
-    case ERROR.ErrLimitFOKNotFillable:
-      return new Error(ERROR.ErrLimitFOKNotFillable)
-    case ERROR.ErrPostOnlyWouldCross:
-      return new Error(ERROR.ErrPostOnlyWouldCross)
-    case ERROR.ErrJournalLog:
-      return new Error(ERROR.ErrJournalLog)
-    default:
-      error = error === undefined || error === '' ? '' : `: ${error}`
-      return new Error(`${ERROR.Default}${error}`)
-  }
+export const ErrorCodes: Record<ERROR, number> = {
+	// 10xx General issues
+	[ERROR.DEFAULT]: 1000,
+
+	// 11xx Request issues
+	[ERROR.INVALID_ORDER_TYPE]: 1100,
+	[ERROR.INVALID_SIDE]: 1101,
+	[ERROR.INVALID_QUANTITY]: 1102,
+	[ERROR.INVALID_PRICE]: 1103,
+	[ERROR.INVALID_PRICE_OR_QUANTITY]: 1104,
+	[ERROR.INVALID_TIF]: 1105,
+	[ERROR.LIMIT_ORDER_FOK_NOT_FILLABLE]: 1106,
+	[ERROR.LIMIT_ORDER_POST_ONLY]: 1107,
+	[ERROR.INVALID_CONDITIONAL_ORDER]: 1108,
+	[ERROR.ORDER_ALREDY_EXISTS]: 1109,
+	[ERROR.ORDER_NOT_FOUND]: 1110,
+
+	// 12xx Internal error
+	[ERROR.INSUFFICIENT_QUANTITY]: 1200,
+	[ERROR.INVALID_PRICE_LEVEL]: 1201,
+	[ERROR.INVALID_JOURNAL_LOG]: 1201,
+	[ERROR.STP_TRIGGERED]: 1202,
+};
+
+export const ErrorMessages: Record<ERROR, string> = {
+	[ERROR.DEFAULT]: "Something wrong",
+	[ERROR.INSUFFICIENT_QUANTITY]: "Insufficient quantity to calculate price",
+	[ERROR.INVALID_CONDITIONAL_ORDER]:
+		"Stop-Limit Order (BUY: marketPrice < stopPrice <= price, SELL: marketPrice > stopPrice >= price). Stop-Market Order (BUY: marketPrice < stopPrice, SELL: marketPrice > stopPrice). OCO order (BUY: price < marketPrice < stopPrice, SELL: price > marketPrice > stopPrice)",
+	[ERROR.INVALID_ORDER_TYPE]: "Supported order type are 'limit' and 'market'",
+	[ERROR.INVALID_PRICE]: "Invalid order price",
+	[ERROR.INVALID_PRICE_LEVEL]: "Invalid order price level",
+	[ERROR.INVALID_PRICE_OR_QUANTITY]: "Invalid order price or quantity",
+	[ERROR.INVALID_QUANTITY]: "Invalid order quantity",
+	[ERROR.INVALID_SIDE]: "Invalid side: must be either 'sell' or 'buy'",
+	[ERROR.INVALID_TIF]:
+		"Invalid TimeInForce: must be one of 'GTC', 'IOC' or 'FOK'",
+	[ERROR.LIMIT_ORDER_FOK_NOT_FILLABLE]: "Limit FOK order not fillable",
+	[ERROR.LIMIT_ORDER_POST_ONLY]:
+		"Post-only limit order rejected because would execute immediately",
+	[ERROR.ORDER_ALREDY_EXISTS]: "Order already exists",
+	[ERROR.ORDER_NOT_FOUND]: "Order not found",
+	[ERROR.INVALID_JOURNAL_LOG]: "Invalid journal log format",
+	[ERROR.STP_TRIGGERED]: "Self-trade prevention triggered",
+};
+
+export class OrderBookError implements IError {
+	message: string;
+	code: number;
+	constructor(error?: ERROR | string) {
+		let errorMessage: string;
+		if (error != null && ErrorMessages[error as ERROR] != null) {
+			errorMessage = ErrorMessages[error as ERROR];
+		} else {
+			const customMessage =
+				error === undefined || error === "" ? "" : `: ${error}`;
+			errorMessage = `${ErrorMessages.DEFAULT}${customMessage}`;
+		}
+		this.message = errorMessage;
+		this.code = ErrorCodes[error as ERROR] ?? ErrorCodes[ERROR.DEFAULT];
+	}
 }
+/* node:coverage ignore next - Don't know why this line is uncoverd */
+export const CustomError = (error?: ERROR | string): OrderBookError => {
+	return new OrderBookError(error);
+};

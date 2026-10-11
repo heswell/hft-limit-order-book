@@ -2,6 +2,7 @@
 import { OrderBook } from "./orderbook";
 import type {
 	CreateOrderOptions,
+	DepthLevel,
 	ICancelOrder,
 	IOrder,
 	IProcessOrder,
@@ -13,11 +14,13 @@ import type {
 	OrderUpdateSize,
 	StopLimitOrderOptions,
 	StopMarketOrderOptions,
+	Trade,
 } from "./types";
-import { OrderType, SelfTradePreventionMode, Side } from "./types";
+import { OrderType, SelfTradePreventionMode, Side, TimeInForce } from "./types";
 
 export {
 	type CreateOrderOptions,
+	type DepthLevel,
 	type ICancelOrder,
 	type IOrder,
 	type IProcessOrder,
@@ -33,5 +36,7 @@ export {
 	Side,
 	type StopLimitOrderOptions,
 	type StopMarketOrderOptions,
+	TimeInForce,
+	type Trade,
 };
 /* node:coverage enable */

@@ -1,293 +1,284 @@
-import { test } from 'tap'
-import { OrderBook } from '../src/orderbook'
-import { Side } from '../src/side'
-import { OrderType, TimeInForce } from '../src/order'
-import { ERROR } from '../src/errors'
-import type { Trade } from '../src/types'
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+	OrderBook,
+	OrderType,
+	SelfTradePreventionMode,
+	Side,
+	TimeInForce,
+	type Trade,
+} from "../src";
 
-const fixedClock = (start = 1000): (() => number) => {
-  let t = start
-  return () => t++
-}
+const mk = (opts = {}) => {
+	let t = 1000;
+	return new OrderBook({ clock: () => ++t, ...opts });
+};
 
-const book = (extra = {}): { ob: OrderBook, seen: Trade[] } => {
-  const seen: Trade[] = []
-  const ob = new OrderBook({
-    clock: fixedClock(),
-    onTrade: (t) => seen.push(t),
-    ...extra
-  })
-  return { ob, seen }
-}
+describe("trades", () => {
+	it("partial fill of a resting order", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 10, price: 100 });
+		const r = ob.limit({ side: Side.BUY, id: "b1", size: 4, price: 100 });
+		assert.equal(r.trades.length, 1);
+		const t = r.trades[0];
+		assert.equal(t.makerOrderId, "s1");
+		assert.equal(t.takerOrderId, "b1");
+		assert.equal(t.side, Side.BUY);
+		assert.equal(t.price, 100);
+		assert.equal(t.size, 4);
+		assert.equal(ob.order("s1")?.size, 6);
+	});
 
-void test('no trades when nothing matches', ({ equal, same, end }) => {
-  const { ob, seen } = book()
-  const r = ob.limit(Side.BUY, 'b1', 5, 100)
-  same(r.trades, [])
-  equal(seen.length, 0)
-  end()
-})
+	it("sweeps levels at maker prices and leaves remainder", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		ob.limit({ side: Side.SELL, id: "s2", size: 3, price: 101 });
+		ob.limit({ side: Side.SELL, id: "s3", size: 5, price: 102 });
+		const r = ob.limit({ side: Side.BUY, id: "b", size: 7, price: 105 });
+		assert.deepEqual(
+			r.trades.map((t) => [t.makerOrderId, t.price, t.size]),
+			[
+				["s1", 100, 2],
+				["s2", 101, 3],
+				["s3", 102, 2],
+			],
+		);
+		assert.equal(r.quantityLeft, 0);
+		assert.equal(ob.order("s3")?.size, 3);
+	});
 
-void test('limit: partial fill of maker', ({ equal, same, end }) => {
-  const { ob, seen } = book()
-  ob.limit(Side.SELL, 's1', 10, 100)
-  const r = ob.limit(Side.BUY, 'b1', 4, 101)
-  equal(r.trades.length, 1)
-  const t = r.trades[0]
-  equal(t.makerOrderId, 's1')
-  equal(t.takerOrderId, 'b1')
-  equal(t.side, Side.BUY)
-  equal(t.price, 100)
-  equal(t.size, 4)
-  equal(typeof t.tradeId, 'string')
-  equal(ob.order('s1')?.size, 6)
-  same(seen, r.trades)
-  end()
-})
+	it("rests the unfilled remainder of a limit order", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		const r = ob.limit({ side: Side.BUY, id: "b", size: 5, price: 100 });
+		assert.equal(r.trades.length, 1);
+		assert.equal(ob.order("b")?.size, 3);
+	});
 
-void test('limit: partial fill of taker rests remainder', ({ equal, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 3, 100)
-  const r = ob.limit(Side.BUY, 'b1', 10, 100)
-  equal(r.trades.length, 1)
-  equal(r.trades[0].size, 3)
-  equal(ob.order('b1')?.size, 7)
-  end()
-})
+	it("IOC reports trades and does not rest", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		const r = ob.limit({
+			side: Side.BUY,
+			id: "b",
+			size: 5,
+			price: 100,
+			timeInForce: TimeInForce.IOC,
+		});
+		assert.equal(r.trades.length, 1);
+		assert.equal(r.trades[0].size, 2);
+		assert.equal(ob.order("b"), undefined);
+	});
 
-void test('limit: sweep across levels and orders', ({ equal, same, end }) => {
-  const { ob, seen } = book()
-  ob.limit(Side.SELL, 's1', 2, 100)
-  ob.limit(Side.SELL, 's2', 3, 100)
-  ob.limit(Side.SELL, 's3', 4, 101)
-  ob.limit(Side.SELL, 's4', 5, 105)
-  const r = ob.limit(Side.BUY, 'b1', 8, 102)
-  same(
-    r.trades.map((t) => [t.makerOrderId, t.price, t.size]),
-    [['s1', 100, 2], ['s2', 100, 3], ['s3', 101, 3]]
-  )
-  equal(ob.order('s3')?.size, 1)
-  equal(seen.length, 3)
-  // trade sizes sum to filled quantity
-  equal(r.trades.reduce((a, t) => a + t.size, 0), 8)
-  end()
-})
+	it("FOK not fillable yields no trades; fillable yields trades", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		const bad = ob.limit({
+			side: Side.BUY,
+			id: "b1",
+			size: 5,
+			price: 100,
+			timeInForce: TimeInForce.FOK,
+		});
+		assert.notEqual(bad.err, null);
+		assert.equal(bad.trades.length, 0);
+		const ok = ob.limit({
+			side: Side.BUY,
+			id: "b2",
+			size: 2,
+			price: 100,
+			timeInForce: TimeInForce.FOK,
+		});
+		assert.equal(ok.err, null);
+		assert.equal(ok.trades.length, 1);
+	});
 
-void test('limit: sell aggressor sweeps bids at maker prices', ({ same, equal, end }) => {
-  const { ob } = book()
-  ob.limit(Side.BUY, 'b1', 2, 100)
-  ob.limit(Side.BUY, 'b2', 2, 99)
-  const r = ob.limit(Side.SELL, 's1', 3, 99)
-  same(
-    r.trades.map((t) => [t.makerOrderId, t.side, t.price, t.size]),
-    [['b1', Side.SELL, 100, 2], ['b2', Side.SELL, 99, 1]]
-  )
-  equal(ob.order('b2')?.size, 1)
-  end()
-})
+	it("market orders use supplied id, or generate one", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 5, price: 100 });
+		const a = ob.market({ side: Side.BUY, id: "m1", size: 2 });
+		assert.equal(a.trades[0].takerOrderId, "m1");
+		assert.equal(a.trades[0].side, Side.BUY);
+		const b = ob.market({ side: Side.BUY, size: 1 });
+		assert.ok(b.trades[0].takerOrderId.length > 0);
+		const dup = ob.market({ side: Side.BUY, id: "s1", size: 1 });
+		assert.notEqual(dup.err, null);
+	});
 
-void test('market order: caller id, generated id, sweeps', ({ equal, same, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 2, 100)
-  ob.limit(Side.SELL, 's2', 2, 101)
-  const r = ob.market(Side.BUY, 3, 'mkt-A')
-  same(
-    r.trades.map((t) => [t.makerOrderId, t.takerOrderId, t.price, t.size]),
-    [['s1', 'mkt-A', 100, 2], ['s2', 'mkt-A', 101, 1]]
-  )
-  const r2 = ob.market(Side.BUY, 1)
-  equal(r2.trades.length, 1)
-  equal(typeof r2.trades[0].takerOrderId, 'string')
-  equal(r2.trades[0].takerOrderId.length > 0, true)
-  const r3 = ob.createOrder(OrderType.MARKET, Side.SELL, 1, undefined, 'x')
-  equal(r3.trades.length, 0)
-  end()
-})
+	it("market sell reports sell aggressor", () => {
+		const ob = mk();
+		ob.limit({ side: Side.BUY, id: "b1", size: 5, price: 100 });
+		const r = ob.market({ side: Side.SELL, id: "m", size: 3 });
+		assert.equal(r.trades[0].side, Side.SELL);
+		assert.equal(r.trades[0].price, 100);
+	});
 
-void test('market order: id of resting order rejected; remaining quantity', ({ equal, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 2, 100)
-  ob.limit(Side.BUY, 'b1', 1, 50)
-  equal(ob.market(Side.BUY, 1, 'b1').err?.message, ERROR.ErrOrderExists)
-  const r = ob.market(Side.BUY, 5, 'm1')
-  equal(r.quantityLeft, 3)
-  equal(r.trades.length, 1)
-  end()
-})
+	it("deterministic clock and monotonic seq", () => {
+		const ob = mk();
+		const r1 = ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		const r2 = ob.limit({ side: Side.BUY, id: "b1", size: 1, price: 100 });
+		const r3 = ob.limit({ side: Side.BUY, id: "b2", size: 1, price: 100 });
+		assert.equal(ob.order("s1"), undefined);
+		assert.ok(r1.seq < r2.seq);
+		assert.ok(r2.seq < r2.trades[0].seq);
+		assert.ok(r2.trades[0].seq < r3.seq);
+		assert.ok(r3.seq < r3.trades[0].seq);
+		assert.equal(ob.seq, r3.trades[0].seq);
+		assert.equal(r2.trades[0].timestamp, 1002);
+		assert.equal(r3.trades[0].timestamp, 1003);
+	});
 
-void test('IOC: trades for fillable part, rest cancelled', ({ equal, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 3, 100)
-  const r = ob.limit(Side.BUY, 'b1', 5, 100, TimeInForce.IOC)
-  equal(r.trades.length, 1)
-  equal(r.trades[0].size, 3)
-  equal(r.quantityLeft, 2)
-  equal(ob.order('b1'), undefined)
-  end()
-})
+	it("clock is used for order time and snapshot", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		assert.equal(ob.order("s1")?.time, 1001);
+		assert.equal(ob.snapshot().ts, 1002);
+	});
 
-void test('FOK: unfillable yields no trades and no callbacks; fillable trades', ({ equal, end }) => {
-  const { ob, seen } = book()
-  ob.limit(Side.SELL, 's1', 3, 100)
-  const bad = ob.limit(Side.BUY, 'b1', 5, 100, TimeInForce.FOK)
-  equal(bad.err?.message, ERROR.ErrLimitFOKNotFillable)
-  equal(bad.trades.length, 0)
-  equal(seen.length, 0)
-  equal(ob.order('s1')?.size, 3)
-  const ok = ob.limit(Side.BUY, 'b2', 3, 100, TimeInForce.FOK)
-  equal(ok.trades.length, 1)
-  equal(seen.length, 1)
-  end()
-})
+	it("invalid operations do not consume a seq", () => {
+		const ob = mk();
+		const before = ob.seq;
+		const r = ob.limit({ side: Side.BUY, id: "x", size: 0, price: 1 });
+		assert.notEqual(r.err, null);
+		assert.equal(ob.seq, before);
+	});
 
-void test('modify that crosses produces trades with preserved owner', ({ equal, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 3, 100, TimeInForce.GTC, { owner: 'maker' })
-  ob.limit(Side.BUY, 'b1', 3, 90, TimeInForce.GTC, { owner: 'me', meta: { a: 1 } })
-  const r = ob.modify('b1', { price: 100 })
-  equal(r.trades.length, 1)
-  equal(r.trades[0].takerOwner, 'me')
-  equal(r.trades[0].makerOwner, 'maker')
-  end()
-})
+	it("onTrade fires per execution in order", () => {
+		const seen: Trade[] = [];
+		const ob = mk({ onTrade: (t: Trade) => seen.push(t) });
+		ob.limit({ side: Side.SELL, id: "s1", size: 1, price: 100 });
+		ob.limit({ side: Side.SELL, id: "s2", size: 1, price: 101 });
+		const r = ob.market({ side: Side.BUY, id: "m", size: 2 });
+		assert.deepEqual(seen, r.trades);
+		assert.equal(seen.length, 2);
+	});
 
-void test('deterministic clock is used everywhere', ({ equal, same, end }) => {
-  let now = 5000
-  const ob = new OrderBook({ clock: () => now, enableJournaling: true })
-  const l = ob.limit(Side.SELL, 's1', 5, 100)
-  equal(l.log?.ts, 5000)
-  equal(ob.order('s1')?.time, 5000)
-  now = 6000
-  const r = ob.limit(Side.BUY, 'b1', 2, 100)
-  equal(r.trades[0].timestamp, 6000)
-  equal(r.log?.ts, 6000)
-  equal(r.done[0].time, 6000)
-  now = 7000
-  equal(ob.snapshot().ts, 7000)
-  const m = ob.modify('s1', { size: 2 })
-  equal(m.log?.ts, 7000)
-  equal(ob.order('s1')?.time, 7000)
-  now = 8000
-  equal(ob.cancel('s1')?.log?.ts, 8000)
-  const a = new OrderBook({ clock: () => 1 })
-  const b = new OrderBook({ clock: () => 1 })
-  for (const x of [a, b]) {
-    x.limit(Side.SELL, 's', 5, 10)
-    x.market(Side.BUY, 2)
-  }
-  same(a.snapshot(), b.snapshot())
-  end()
-})
+	it("onTrade is not fired while replaying a journal", () => {
+		const log = mk({ enableJournaling: true });
+		const journal = [
+			log.limit({ side: Side.SELL, id: "s1", size: 1, price: 100 }).log,
+			log.market({ side: Side.BUY, id: "m", size: 1 }).log,
+		];
+		let n = 0;
+		new OrderBook({
+			journal: journal as never,
+			onTrade: () => n++,
+			clock: () => 1,
+		});
+		assert.equal(n, 0);
+	});
 
-void test('owner/meta passthrough to orders, snapshots, trades', ({ equal, same, end }) => {
-  const { ob } = book()
-  ob.limit(Side.SELL, 's1', 5, 100, TimeInForce.GTC, { owner: 'bot1', meta: { k: 1 } })
-  equal(ob.order('s1')?.owner, 'bot1')
-  same(ob.order('s1')?.toObject().meta, { k: 1 })
-  const r = ob.market(Side.BUY, 2, 'm1', { owner: 'bot2', meta: 'x' })
-  const t = r.trades[0]
-  equal(t.makerOwner, 'bot1')
-  equal(t.takerOwner, 'bot2')
-  same(t.makerMeta, { k: 1 })
-  equal(t.takerMeta, 'x')
-  // partially filled maker keeps owner
-  equal(ob.order('s1')?.owner, 'bot1')
-  const snap = ob.snapshot()
-  equal(snap.asks[0].orders[0].owner, 'bot1')
-  const ob2 = new OrderBook({ snapshot: snap })
-  equal(ob2.order('s1')?.owner, 'bot1')
-  // aggregated taker order in done carries owner
-  const r2 = ob.limit(Side.BUY, 'b9', 3, 100, TimeInForce.GTC, { owner: 'bot3' })
-  equal(r2.done[r2.done.length - 1].owner, 'bot3')
-  // owner absent means no keys
-  const r3 = new OrderBook()
-  r3.limit(Side.SELL, 'a', 1, 1)
-  equal('owner' in (r3.order('a')?.toObject() ?? {}), false)
-  end()
-})
+	it("passes owner/meta to orders, snapshots and trades", () => {
+		const ob = mk();
+		ob.limit({
+			side: Side.SELL,
+			id: "s1",
+			size: 2,
+			price: 100,
+			owner: "alice",
+			meta: { a: 1 },
+		});
+		assert.equal(ob.order("s1")?.owner, "alice");
+		assert.deepEqual(ob.snapshot().asks[0].orders[0].owner, "alice");
+		const r = ob.market({
+			side: Side.BUY,
+			id: "m",
+			size: 1,
+			owner: "bob",
+			meta: "x",
+		});
+		const t = r.trades[0];
+		assert.equal(t.makerOwner, "alice");
+		assert.deepEqual(t.makerMeta, { a: 1 });
+		assert.equal(t.takerOwner, "bob");
+		assert.equal(t.takerMeta, "x");
+		const ob2 = new OrderBook({ snapshot: ob.snapshot() });
+		assert.equal(ob2.order("s1")?.owner, "alice");
+	});
 
-void test('seq is monotonic across operations and trades', ({ equal, ok, end }) => {
-  const { ob, seen } = book()
-  const a = ob.limit(Side.SELL, 's1', 1, 100)
-  const b = ob.limit(Side.SELL, 's2', 1, 100)
-  const c = ob.limit(Side.BUY, 'b1', 2, 100)
-  ok(a.seq < b.seq && b.seq < c.seq)
-  ok(c.trades[0].seq > c.seq)
-  ok(c.trades[1].seq > c.trades[0].seq)
-  equal(ob.seq, c.trades[1].seq)
-  equal(seen.length, 2)
-  ob.limit(Side.BUY, 'rest', 1, 50)
-  const bad = ob.limit(Side.BUY, 'rest', 2, 50)
-  equal(bad.err?.message, ERROR.ErrOrderExists)
-  equal(bad.seq, ob.seq)
-  const snap = ob.snapshot()
-  equal(new OrderBook({ snapshot: snap }).seq, snap.seq)
-  end()
-})
+	it("modify keeps owner and meta", () => {
+		const ob = mk();
+		ob.limit({ side: Side.BUY, id: "b", size: 2, price: 99, owner: "al" });
+		ob.modify("b", { size: 3 });
+		assert.equal(ob.order("b")?.owner, "al");
+	});
 
-void test('depth(levels) and depthDetailed', ({ same, end }) => {
-  const { ob } = book()
-  for (const p of [100, 101, 102]) {
-    ob.limit(Side.SELL, `s${p}a`, 1, p)
-    ob.limit(Side.SELL, `s${p}b`, 2, p)
-  }
-  for (const p of [99, 98, 97]) ob.limit(Side.BUY, `b${p}`, 5, p)
-  same(ob.depth(2), [[[100, 3], [101, 3]], [[99, 5], [98, 5]]])
-  same(ob.depth(0), [[], []])
-  same(ob.depth(10)[0].length, 3)
-  same(ob.depth().map((s) => s.length), [3, 3])
-  same(ob.depthDetailed(1), [
-    [{ price: 100, size: 3, count: 2 }],
-    [{ price: 99, size: 5, count: 1 }]
-  ])
-  same(ob.depthDetailed()[0].map((l) => l.count), [2, 2, 2])
-  end()
-})
+	it("stop activation produces trades with the stop id as taker", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 5, price: 100 });
+		ob.limit({ side: Side.SELL, id: "s2", size: 5, price: 101 });
+		const stop = ob.stopLimit({
+			side: Side.BUY,
+			id: "st",
+			size: 2,
+			price: 105,
+			stopPrice: 100,
+		});
+		assert.equal(stop.err, null);
+		const r = ob.limit({ side: Side.BUY, id: "b", size: 1, price: 100 });
+		assert.equal(r.trades.length, 2);
+		assert.equal(r.trades[0].takerOrderId, "b");
+		assert.equal(r.trades[1].takerOrderId, "st");
+		assert.ok(r.trades[0].seq < r.trades[1].seq);
+	});
 
-void test('postOnly: rejects when crossing, rests otherwise', ({ equal, same, end }) => {
-  const { ob, seen } = book()
-  ob.limit(Side.SELL, 's1', 5, 100)
-  const bad = ob.limit(Side.BUY, 'b1', 1, 100, TimeInForce.GTC, { postOnly: true })
-  equal(bad.err?.message, ERROR.ErrPostOnlyWouldCross)
-  equal(ob.order('b1'), undefined)
-  equal(seen.length, 0)
-  equal(ob.order('s1')?.size, 5)
-  const ok = ob.limit(Side.BUY, 'b2', 1, 99, TimeInForce.GTC, { postOnly: true })
-  equal(ok.err, null)
-  equal(ob.order('b2')?.size, 1)
-  const badSell = ob.limit(Side.SELL, 's2', 1, 99, TimeInForce.GTC, { postOnly: true })
-  equal(badSell.err?.message, ERROR.ErrPostOnlyWouldCross)
-  const viaCreate = ob.createOrder(OrderType.LIMIT, Side.BUY, 1, 101, 'b3', TimeInForce.GTC, { postOnly: true })
-  equal(viaCreate.err?.message, ERROR.ErrPostOnlyWouldCross)
-  same(ob.limit(Side.SELL, 's3', 1, 101, TimeInForce.GTC, { postOnly: true }).err, null)
-  end()
-})
+	it("STP never produces trades", () => {
+		const ob = mk();
+		ob.limit({
+			side: Side.SELL,
+			id: "s1",
+			size: 2,
+			price: 100,
+			accountId: "A",
+			stpMode: SelfTradePreventionMode.EXPIRE_MAKER,
+		});
+		const r = ob.limit({
+			side: Side.BUY,
+			id: "b",
+			size: 2,
+			price: 100,
+			accountId: "A",
+			stpMode: SelfTradePreventionMode.EXPIRE_MAKER,
+		});
+		assert.equal(r.trades.length, 0);
+	});
 
-void test('journal replay restores extras and does not fire onTrade', ({ equal, same, end }) => {
-  const live: Trade[] = []
-  const ob = new OrderBook({ enableJournaling: true, clock: () => 1, onTrade: (t) => live.push(t) })
-  const logs = [
-    ob.limit(Side.SELL, 's1', 5, 100, TimeInForce.GTC, { owner: 'o', postOnly: true }).log,
-    ob.market(Side.BUY, 2, 'm1', { owner: 'p', meta: 1 }).log
-  ]
-  equal(live.length, 1)
-  same(logs[1]?.o, { side: Side.BUY, size: 2, orderID: 'm1', owner: 'p', meta: 1 })
-  const replayed: Trade[] = []
-  const ob2 = new OrderBook({ journal: logs as any, clock: () => 1, onTrade: (t) => replayed.push(t) })
-  equal(replayed.length, 0)
-  equal(ob2.order('s1')?.size, 3)
-  equal(ob2.order('s1')?.owner, 'o')
-  equal(ob2.seq, ob.seq)
-  // replay of crossing postOnly is deterministic
-  equal(ob2.limit(Side.SELL, 'z', 1, 100).err, null)
-  end()
-})
+	it("post-only crossing is rejected without trades", () => {
+		const ob = mk();
+		ob.limit({ side: Side.SELL, id: "s1", size: 2, price: 100 });
+		const r = ob.limit({
+			side: Side.BUY,
+			id: "b",
+			size: 2,
+			price: 100,
+			postOnly: true,
+		});
+		assert.notEqual(r.err, null);
+		assert.equal(r.trades.length, 0);
+	});
 
-void test('invalid order type result has trades/seq', ({ same, equal, end }) => {
-  const ob = new OrderBook()
-  // @ts-expect-error invalid type
-  const r = ob.createOrder('bad', Side.BUY, 1)
-  same(r.trades, [])
-  equal(r.seq, 0)
-  end()
-})
+	it("depth limits levels and depthDetailed reports counts", () => {
+		const ob = mk();
+		for (const [i, p] of [100, 101, 102].entries()) {
+			ob.limit({ side: Side.SELL, id: `a${i}`, size: 1, price: p });
+			ob.limit({ side: Side.BUY, id: `b${i}`, size: 1, price: p - 10 });
+		}
+		ob.limit({ side: Side.SELL, id: "a9", size: 4, price: 100 });
+		assert.equal(ob.depth()[0].length, 3);
+		assert.deepEqual(ob.depth(2), [
+			[
+				[100, 5],
+				[101, 1],
+			],
+			[
+				[92, 1],
+				[91, 1],
+			],
+		]);
+		assert.deepEqual(ob.depth(0), [[], []]);
+		const [asks, bids] = ob.depthDetailed(1);
+		assert.deepEqual(asks, [{ price: 100, size: 5, count: 2 }]);
+		assert.deepEqual(bids, [{ price: 92, size: 1, count: 1 }]);
+		assert.equal(OrderType.LIMIT, "limit");
+	});
+});

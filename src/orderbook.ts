@@ -11,6 +11,7 @@ import { OrderSide } from "./orderside";
 import { StopBook } from "./stopbook";
 import {
 	type CreateOrderOptions,
+	type DepthLevel,
 	type ICancelOrder,
 	type ILimitOrder,
 	type IOrder,
@@ -30,14 +31,34 @@ import {
 	type StopMarketOrderOptions,
 	type StopOrder,
 	TimeInForce,
+	type Trade,
 } from "./types";
 
 const validTimeInForce = Object.values(TimeInForce);
+
+interface Taker {
+	id: string;
+	side: Side;
+	accountId?: string;
+	owner?: unknown;
+	meta?: unknown;
+}
+
+interface Extras {
+	owner?: unknown;
+	meta?: unknown;
+}
 
 export class OrderBook {
 	private orders: { [key: string]: LimitOrder } = {};
 	private _lastOp = 0;
 	private _marketPrice = 0;
+	private _seq = 0;
+	private _tradeCount = 0;
+	private _now = 0;
+	private _replaying = false;
+	private readonly clock: () => number;
+	private readonly onTrade?: (trade: Trade) => void;
 	private readonly bids: OrderSide;
 	private readonly asks: OrderSide;
 	private readonly enableJournaling: boolean;
@@ -48,14 +69,20 @@ export class OrderBook {
 	 * @param {JournalLog} [options.snapshot] - The orderbook snapshot will be restored before processing any journal logs, if any.
 	 * @param {JournalLog} [options.journal] - Array of journal logs (optional).
 	 * @param {boolean} [options.enableJournaling=false] - Flag to enable journaling. Default to false
+	 * @param {() => number} [options.clock=Date.now] - Time source used for every timestamp
+	 * @param {(trade: Trade) => void} [options.onTrade] - Called for every execution, after the operation has been applied
 	 */
 	constructor({
 		snapshot,
 		journal,
 		enableJournaling = false,
+		clock = Date.now,
+		onTrade,
 	}: OrderBookOptions = {}) {
-		this.bids = new OrderSide(Side.BUY);
-		this.asks = new OrderSide(Side.SELL);
+		this.clock = clock;
+		this.onTrade = onTrade;
+		this.bids = new OrderSide(Side.BUY, clock);
+		this.asks = new OrderSide(Side.SELL, clock);
 		this.enableJournaling = enableJournaling;
 		this.stopBook = new StopBook();
 		// First restore from orderbook snapshot
@@ -69,8 +96,18 @@ export class OrderBook {
 			if (snapshot != null && snapshot.lastOp > 0) {
 				journal = journal.filter((log) => log.opId > snapshot.lastOp);
 			}
-			this.replayJournal(journal);
+			this._replaying = true;
+			try {
+				this.replayJournal(journal);
+			} finally {
+				this._replaying = false;
+			}
 		}
+	}
+
+	// Getter for the sequence number of the latest operation or trade
+	get seq(): number {
+		return this._seq;
 	}
 
 	// Getter for the market price
@@ -110,15 +147,11 @@ export class OrderBook {
 				return this.stopLimit(options);
 			case OrderType.OCO:
 				return this.oco(options);
-			default:
-				return {
-					done: [],
-					activated: [],
-					partial: null,
-					partialQuantityProcessed: 0,
-					quantityLeft: 0,
-					err: CustomError(ERROR.INVALID_ORDER_TYPE),
-				};
+			default: {
+				const response = this.getProcessOrderResponse(0);
+				response.err = CustomError(ERROR.INVALID_ORDER_TYPE);
+				return response;
+			}
 		}
 	}
 
@@ -131,16 +164,17 @@ export class OrderBook {
 	 * @returns An object with the result of the processed order or an error. See {@link IProcessOrder} for the returned data structure
 	 */
 	public market(options: MarketOrderOptions): IProcessOrder {
+		this._now = this.clock();
 		const response = this._market(options);
 		if (this.enableJournaling && response.err === null) {
 			response.log = {
 				opId: ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "m",
 				o: options,
 			};
 		}
-		return response;
+		return this.finalize(response);
 	}
 
 	/**
@@ -153,16 +187,17 @@ export class OrderBook {
 	 * @returns An object with the result of the processed order or an error. See {@link IProcessOrder} for the returned data structure
 	 */
 	public stopMarket = (options: StopMarketOrderOptions): IProcessOrder => {
+		this._now = this.clock();
 		const response = this._stopMarket(options);
 		if (this.enableJournaling && response.err === null) {
 			response.log = {
 				opId: ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "sm",
 				o: options,
 			};
 		}
-		return response;
+		return this.finalize(response);
 	};
 
 	/**
@@ -178,16 +213,17 @@ export class OrderBook {
 	 * @returns An object with the result of the processed order or an error. See {@link IProcessOrder} for the returned data structure
 	 */
 	public limit(options: LimitOrderOptions): IProcessOrder {
+		this._now = this.clock();
 		const response = this._limit(options);
 		if (this.enableJournaling && response.err === null) {
 			response.log = {
 				opId: ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "l",
 				o: options,
 			};
 		}
-		return response;
+		return this.finalize(response);
 	}
 
 	/**
@@ -203,16 +239,17 @@ export class OrderBook {
 	 * @returns An object with the result of the processed order or an error. See {@link IProcessOrder} for the returned data structure
 	 */
 	public stopLimit = (options: StopLimitOrderOptions): IProcessOrder => {
+		this._now = this.clock();
 		const response = this._stopLimit(options);
 		if (this.enableJournaling && response.err === null) {
 			response.log = {
 				opId: ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "sl",
 				o: options,
 			};
 		}
-		return response;
+		return this.finalize(response);
 	};
 
 	/**
@@ -239,16 +276,17 @@ export class OrderBook {
 	 * @returns An object with the result of the processed order or an error. See {@link IProcessOrder} for the returned data structure
 	 */
 	public oco = (options: OCOOrderOptions): IProcessOrder => {
+		this._now = this.clock();
 		const response = this._oco(options);
 		if (this.enableJournaling && response.err === null) {
 			response.log = {
 				opId: ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "oco",
 				o: options,
 			};
 		}
-		return response;
+		return this.finalize(response);
 	};
 
 	/**
@@ -267,20 +305,17 @@ export class OrderBook {
 	): IProcessOrder => {
 		const order = this.orders[orderID];
 		if (order === undefined) {
-			return {
-				done: [],
-				activated: [],
-				partial: null,
-				partialQuantityProcessed: 0,
-				quantityLeft: 0,
-				err: CustomError(ERROR.ORDER_NOT_FOUND),
-			};
+			const response = this.getProcessOrderResponse(0);
+			response.err = CustomError(ERROR.ORDER_NOT_FOUND);
+			return response;
 		}
 		if (orderUpdate?.price !== undefined || orderUpdate?.size !== undefined) {
 			const newPrice = orderUpdate.price ?? order.price;
 			const newSize = orderUpdate.size ?? order.size;
 			if (newPrice > 0 && newSize > 0) {
+				this._now = this.clock();
 				const response = this.getProcessOrderResponse(newSize);
+				response.seq = this.nextSeq();
 				this._cancelOrder(order.id, true);
 				this.createLimitOrder(
 					response,
@@ -291,29 +326,25 @@ export class OrderBook {
 					order.postOnly,
 					TimeInForce.GTC,
 					undefined,
-					"",
+					order.accountId,
 					SelfTradePreventionMode.NONE,
+					{ owner: order.owner, meta: order.meta },
 				);
 				if (this.enableJournaling) {
 					response.log = {
 						opId: ++this._lastOp,
-						ts: Date.now(),
+						ts: this._now,
 						op: "u",
 						o: { orderID, orderUpdate },
 					};
 				}
-				return response;
+				return this.finalize(response);
 			}
 		}
 		// Missing one of price and/or size, or the provided ones are not greater than zero
-		return {
-			done: [],
-			activated: [],
-			partial: null,
-			partialQuantityProcessed: 0,
-			quantityLeft: orderUpdate?.size ?? 0,
-			err: CustomError(ERROR.INVALID_PRICE_OR_QUANTITY),
-		};
+		const response = this.getProcessOrderResponse(orderUpdate?.size ?? 0);
+		response.err = CustomError(ERROR.INVALID_PRICE_OR_QUANTITY);
+		return response;
 	};
 
 	/**
@@ -323,6 +354,7 @@ export class OrderBook {
 	 * @returns The removed order if exists or `undefined`
 	 */
 	public cancel = (orderID: string): ICancelOrder | undefined => {
+		this._now = this.clock();
 		return this._cancelOrder(orderID);
 	};
 
@@ -336,17 +368,54 @@ export class OrderBook {
 		return this.orders[orderID]?.toObject();
 	};
 
-	// Returns price levels and volume at price level
-	public depth = (): [Array<[number, number]>, Array<[number, number]>] => {
+	/**
+	 * Returns `[price, size]` levels for asks (ascending) and bids (descending), best first.
+	 *
+	 * @param levels - Optional maximum number of levels returned per side
+	 */
+	public depth = (
+		levels?: number,
+	): [Array<[number, number]>, Array<[number, number]>] => {
 		const asks: Array<[number, number]> = [];
 		const bids: Array<[number, number]> = [];
-		this.asks.priceTree().forEach((levelPrice: number, level: OrderQueue) => {
-			asks.push([levelPrice, level.volume()]);
+		this.collectLevels(this.asks, levels, (price, queue) => {
+			asks.push([price, queue.volume()]);
 		});
-		this.bids.priceTree().forEach((levelPrice: number, level: OrderQueue) => {
-			bids.push([levelPrice, level.volume()]);
+		this.collectLevels(this.bids, levels, (price, queue) => {
+			bids.push([price, queue.volume()]);
 		});
 		return [asks, bids];
+	};
+
+	/**
+	 * Like {@link depth} but each level is `{ price, size, count }`, where `count`
+	 * is the number of resting orders at the level.
+	 */
+	public depthDetailed = (levels?: number): [DepthLevel[], DepthLevel[]] => {
+		const asks: DepthLevel[] = [];
+		const bids: DepthLevel[] = [];
+		this.collectLevels(this.asks, levels, (price, queue) => {
+			asks.push({ price, size: queue.volume(), count: queue.len() });
+		});
+		this.collectLevels(this.bids, levels, (price, queue) => {
+			bids.push({ price, size: queue.volume(), count: queue.len() });
+		});
+		return [asks, bids];
+	};
+
+	private readonly collectLevels = (
+		side: OrderSide,
+		levels: number | undefined,
+		cb: (price: number, queue: OrderQueue) => void,
+	): void => {
+		if (levels !== undefined && !(levels > 0)) return;
+		let n = 0;
+		// biome-ignore lint/suspicious/useIterableCallbackReturn: the forEach of the priceTree must return true to break the loop
+		side.priceTree().forEach((price: number, queue: OrderQueue) => {
+			cb(price, queue);
+			n++;
+			if (levels !== undefined && n >= levels) return true;
+		});
 	};
 
 	public toString = (): string => {
@@ -407,7 +476,14 @@ export class OrderBook {
 			asks.push({ price, orders: orders.toArray().map((o) => o.toObject()) });
 		});
 		const stopBook = this.stopBook.snapshot();
-		return { bids, asks, stopBook, ts: Date.now(), lastOp: this._lastOp };
+		return {
+			bids,
+			asks,
+			stopBook,
+			ts: this.clock(),
+			lastOp: this._lastOp,
+			seq: this._seq,
+		};
 	};
 
 	private readonly _market = (
@@ -416,9 +492,17 @@ export class OrderBook {
 	): IProcessOrder => {
 		const response = incomingResponse ?? this.validateMarketOrder(options);
 		if (response.err !== null) return response;
+		if (incomingResponse === undefined) response.seq = this.nextSeq();
 
 		const takerAccountId = options.accountId;
 		const takerStpMode = options.stpMode;
+		const taker: Taker = {
+			id: options.id ?? `mkt-${response.seq}`,
+			side: options.side,
+			accountId: takerAccountId,
+			owner: options.owner,
+			meta: options.meta,
+		};
 
 		let quantityToTrade = options.size;
 		let iter: () => OrderQueue | undefined;
@@ -448,7 +532,8 @@ export class OrderBook {
 			} = this.processQueue(
 				bestPrice,
 				quantityToTrade,
-				takerAccountId,
+				taker,
+				response.trades,
 				takerStpMode,
 			);
 			response.done = response.done.concat(done);
@@ -480,6 +565,7 @@ export class OrderBook {
 	): IProcessOrder => {
 		const response = incomingResponse ?? this.validateLimitOrder(options);
 		if (response.err !== null) return response;
+		if (incomingResponse === undefined) response.seq = this.nextSeq();
 		this.createLimitOrder(
 			response,
 			options.side,
@@ -491,6 +577,7 @@ export class OrderBook {
 			options.ocoStopPrice,
 			options.accountId,
 			options.stpMode,
+			{ owner: options.owner, meta: options.meta },
 		);
 		return response;
 	};
@@ -500,9 +587,11 @@ export class OrderBook {
 	): IProcessOrder => {
 		const response = this.validateMarketOrder(options);
 		if (response.err !== null) return response;
+		response.seq = this.nextSeq();
 		const stopMarket = OrderFactory.createOrder({
 			...options,
 			type: OrderType.STOP_MARKET,
+			time: this._now,
 		});
 		return this._stopOrder(stopMarket, response);
 	};
@@ -512,9 +601,11 @@ export class OrderBook {
 	): IProcessOrder => {
 		const response = this.validateLimitOrder(options);
 		if (response.err !== null) return response;
+		response.seq = this.nextSeq();
 		const stopLimit = OrderFactory.createOrder({
 			...options,
 			type: OrderType.STOP_LIMIT,
+			time: this._now,
 			timeInForce: options.timeInForce ?? TimeInForce.GTC,
 		});
 		return this._stopOrder(stopLimit, response);
@@ -525,6 +616,7 @@ export class OrderBook {
 		/* node:coverage ignore next - Already validated with limit test */
 		if (response.err !== null) return response;
 		if (this.validateOCOOrder(options)) {
+			response.seq = this.nextSeq();
 			// We use the same ID for Stop Limit and Limit Order, since
 			// we check only on limit order for duplicated ids
 			this._limit(
@@ -535,6 +627,10 @@ export class OrderBook {
 					price: options.price,
 					timeInForce: options.timeInForce,
 					ocoStopPrice: options.stopPrice,
+					accountId: options.accountId,
+					stpMode: options.stpMode,
+					owner: options.owner,
+					meta: options.meta,
 				},
 				response,
 			);
@@ -550,6 +646,11 @@ export class OrderBook {
 				stopPrice: options.stopPrice,
 				timeInForce: options.stopLimitTimeInForce ?? TimeInForce.GTC,
 				isOCO: true,
+				time: this._now,
+				accountId: options.accountId,
+				stpMode: options.stpMode,
+				owner: options.owner,
+				meta: options.meta,
 			});
 			this.stopBook.add(stopLimit);
 			response.done.push(stopLimit.toObject());
@@ -574,6 +675,7 @@ export class OrderBook {
 
 	private readonly restoreSnapshot = (snapshot: Snapshot): void => {
 		this._lastOp = snapshot.lastOp;
+		this._seq = snapshot.seq ?? 0;
 		for (const level of snapshot.bids) {
 			for (const order of level.orders) {
 				const newOrder = OrderFactory.createOrder(order);
@@ -641,7 +743,7 @@ export class OrderBook {
 		if (this.enableJournaling) {
 			response.log = {
 				opId: internalDeletion ? this._lastOp : ++this._lastOp,
-				ts: Date.now(),
+				ts: this._now,
 				op: "d",
 				o: { orderID },
 			};
@@ -657,7 +759,19 @@ export class OrderBook {
 			partialQuantityProcessed: 0,
 			quantityLeft: size,
 			err: null,
+			trades: [],
+			seq: this._seq,
 		};
+	};
+
+	private readonly nextSeq = (): number => ++this._seq;
+
+	// Fires onTrade for each trade of a completed public operation
+	private readonly finalize = (response: IProcessOrder): IProcessOrder => {
+		if (this.onTrade !== undefined && !this._replaying) {
+			for (const trade of response.trades) this.onTrade(trade);
+		}
+		return response;
 	};
 
 	private readonly createLimitOrder = (
@@ -671,7 +785,15 @@ export class OrderBook {
 		ocoStopPrice?: number,
 		takerAccountId?: string,
 		stpMode?: SelfTradePreventionMode,
+		extras: Extras = {},
 	): LimitOrder | undefined => {
+		const taker: Taker = {
+			id: orderID,
+			side,
+			accountId: takerAccountId,
+			owner: extras.owner,
+			meta: extras.meta,
+		};
 		let quantityToTrade = size;
 		let sideToProcess: OrderSide;
 		let sideToAdd: OrderSide;
@@ -726,7 +848,8 @@ export class OrderBook {
 			} = this.processQueue(
 				bestPrice,
 				quantityToTrade,
-				takerAccountId,
+				taker,
+				response.trades,
 				stpMode,
 			);
 			response.done = response.done.concat(done);
@@ -764,13 +887,15 @@ export class OrderBook {
 				size: quantityToTrade,
 				origSize: size,
 				price,
-				time: Date.now(),
+				time: this._now,
 				timeInForce,
 				postOnly,
 				takerQty,
 				makerQty,
 				accountId: takerAccountId,
 				stpMode: stpMode,
+				owner: extras.owner,
+				meta: extras.meta,
 				...(ocoStopPrice !== undefined ? { ocoStopPrice } : {}),
 			});
 			if (response.done.length > 0) {
@@ -799,13 +924,15 @@ export class OrderBook {
 				size,
 				origSize: size,
 				price: totalPrice / totalQuantity,
-				time: Date.now(),
+				time: this._now,
 				timeInForce,
 				postOnly,
 				takerQty,
 				makerQty,
 				accountId: takerAccountId,
 				stpMode: stpMode,
+				owner: extras.owner,
+				meta: extras.meta,
 			});
 			response.done.push(order.toObject());
 		}
@@ -849,6 +976,8 @@ export class OrderBook {
 							size: stopOrder.size,
 							accountId: stopOrder.accountId,
 							stpMode: stopOrder.stpMode,
+							owner: stopOrder.owner,
+							meta: stopOrder.meta,
 						},
 						response,
 					);
@@ -865,6 +994,8 @@ export class OrderBook {
 							timeInForce: stopOrder.timeInForce,
 							accountId: stopOrder.accountId,
 							stpMode: stopOrder.stpMode,
+							owner: stopOrder.owner,
+							meta: stopOrder.meta,
 						},
 						response,
 					);
@@ -982,16 +1113,30 @@ export class OrderBook {
 	private readonly processQueue = (
 		orderQueue: OrderQueue,
 		quantityToTrade: number,
-		takerAccountId?: string,
+		taker: Taker,
+		trades: Trade[],
 		stpMode?: SelfTradePreventionMode,
 	): IProcessOrder => {
-		const response: IProcessOrder = {
-			done: [],
-			activated: [],
-			partial: null,
-			partialQuantityProcessed: 0,
-			quantityLeft: quantityToTrade,
-			err: null,
+		const takerAccountId = taker.accountId;
+		const response = this.getProcessOrderResponse(quantityToTrade);
+		const record = (maker: LimitOrder, size: number): void => {
+			const trade: Trade = {
+				tradeId: `t${++this._tradeCount}`,
+				makerOrderId: maker.id,
+				takerOrderId: taker.id,
+				side: taker.side,
+				price: maker.price,
+				size,
+				timestamp: this._now,
+				seq: this.nextSeq(),
+			};
+			if (maker.accountId) trade.makerAccountId = maker.accountId;
+			if (taker.accountId) trade.takerAccountId = taker.accountId;
+			if (maker.owner !== undefined) trade.makerOwner = maker.owner;
+			if (taker.owner !== undefined) trade.takerOwner = taker.owner;
+			if (maker.meta !== undefined) trade.makerMeta = maker.meta;
+			if (taker.meta !== undefined) trade.takerMeta = taker.meta;
+			trades.push(trade);
 		};
 		if (response.quantityLeft > 0) {
 			while (orderQueue.len() > 0 && response.quantityLeft > 0) {
@@ -1043,6 +1188,7 @@ export class OrderBook {
 					}
 
 					if (response.quantityLeft < headOrder.size) {
+						record(headOrder, response.quantityLeft);
 						const partial = OrderFactory.createOrder({
 							...headOrder.toObject(),
 							size: headOrder.size - response.quantityLeft,
@@ -1053,6 +1199,7 @@ export class OrderBook {
 						orderQueue.update(headOrder, partial);
 						response.quantityLeft = 0;
 					} else {
+						record(headOrder, headOrder.size);
 						response.quantityLeft = response.quantityLeft - headOrder.size;
 						const canceledOrder = this._cancelOrder(headOrder.id, true);
 						/* node:coverage ignore next - Unable to test when order is undefined */
@@ -1188,6 +1335,11 @@ export class OrderBook {
 
 		if (typeof order.size !== "number" || order.size <= 0) {
 			response.err = CustomError(ERROR.INSUFFICIENT_QUANTITY);
+			return response;
+		}
+
+		if (order.id !== undefined && this.orders[order.id] !== undefined) {
+			response.err = CustomError(ERROR.ORDER_ALREDY_EXISTS);
 			return response;
 		}
 		return response;

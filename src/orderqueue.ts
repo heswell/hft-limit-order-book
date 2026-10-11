@@ -78,10 +78,14 @@ export class OrderQueue {
 		}
 	};
 
-	updateOrderSize = (order: LimitOrder, size: number): void => {
+	updateOrderSize = (
+		order: LimitOrder,
+		size: number,
+		now: number = Date.now(),
+	): void => {
 		this._volume += size - order.size; // update volume
 		order.size = size;
-		order.time = Date.now();
+		order.time = now;
 	};
 	/* node:coverage ignore next - Don't know why first and last line of each file count as uncovered */
 }

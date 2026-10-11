@@ -23,6 +23,8 @@ abstract class BaseOrder {
 	_time: number;
 	readonly _accountId: string;
 	readonly _stpMode: SelfTradePreventionMode;
+	readonly _owner?: unknown;
+	readonly _meta?: unknown;
 	constructor(options: OrderOptions) {
 		this._id = options.id ?? randomUUID();
 		this._side = options.side;
@@ -30,6 +32,18 @@ abstract class BaseOrder {
 		this._time = options.time ?? Date.now();
 		this._accountId = options.accountId ?? "";
 		this._stpMode = options.stpMode ?? SelfTradePreventionMode.NONE;
+		this._owner = options.owner;
+		this._meta = options.meta;
+	}
+
+	// Getter for the opaque owner
+	get owner(): unknown {
+		return this._owner;
+	}
+
+	// Getter for the opaque metadata
+	get meta(): unknown {
+		return this._meta;
 	}
 
 	// Getter for order ID
@@ -174,6 +188,8 @@ export class LimitOrder extends BaseOrder {
 		...(this._stpMode !== SelfTradePreventionMode.NONE
 			? { stpMode: this._stpMode }
 			: {}),
+		...(this._owner !== undefined ? { owner: this._owner } : {}),
+		...(this._meta !== undefined ? { meta: this._meta } : {}),
 	});
 }
 
@@ -217,6 +233,8 @@ export class StopMarketOrder extends BaseOrder {
 		...(this._stpMode !== SelfTradePreventionMode.NONE
 			? { stpMode: this._stpMode }
 			: {}),
+		...(this._owner !== undefined ? { owner: this._owner } : {}),
+		...(this._meta !== undefined ? { meta: this._meta } : {}),
 	});
 }
 
@@ -293,6 +311,8 @@ export class StopLimitOrder extends BaseOrder {
 		...(this._stpMode !== SelfTradePreventionMode.NONE
 			? { stpMode: this._stpMode }
 			: {}),
+		...(this._owner !== undefined ? { owner: this._owner } : {}),
+		...(this._meta !== undefined ? { meta: this._meta } : {}),
 	});
 }
 

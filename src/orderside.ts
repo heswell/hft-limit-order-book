@@ -14,7 +14,10 @@ export class OrderSide {
 	private _depthSide = 0;
 	private readonly _side: Side = Side.SELL;
 
-	constructor(side: Side) {
+	private readonly _clock: () => number;
+
+	constructor(side: Side, clock: () => number = Date.now) {
+		this._clock = clock;
 		const compare =
 			side === Side.SELL
 				? (a: number, b: number) => a - b
@@ -94,7 +97,7 @@ export class OrderSide {
 			...oldOrder.toObject(),
 			size: orderUpdate.size !== undefined ? orderUpdate.size : oldOrder.size,
 			price: orderUpdate.price,
-			time: Date.now(),
+			time: this._clock(),
 		});
 		this.append(newOrder);
 		return newOrder;
@@ -112,6 +115,7 @@ export class OrderSide {
 		this._prices[oldOrder.price.toString()].updateOrderSize(
 			oldOrder,
 			orderUpdate.size,
+			this._clock(),
 		);
 		return oldOrder;
 	};

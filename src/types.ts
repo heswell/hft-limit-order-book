@@ -41,6 +41,10 @@ interface BaseOrderOptions {
 	size: number;
 	accountId?: string;
 	stpMode?: SelfTradePreventionMode;
+	/** Opaque value carried to the stored order, snapshots and trade records */
+	owner?: unknown;
+	/** Opaque value carried to the stored order, snapshots and trade records */
+	meta?: unknown;
 }
 interface InternalBaseOrderOptions extends BaseOrderOptions {
 	type: OrderType;
@@ -127,6 +131,8 @@ export interface IMarketOrder {
 	size: number;
 	origSize: number;
 	time: number;
+	owner?: unknown;
+	meta?: unknown;
 }
 
 /**
@@ -145,6 +151,8 @@ export interface ILimitOrder {
 	makerQty: number;
 	accountId?: string;
 	stpMode?: SelfTradePreventionMode;
+	owner?: unknown;
+	meta?: unknown;
 }
 
 /**
@@ -159,6 +167,8 @@ export interface IStopMarketOrder {
 	time: number;
 	accountId?: string;
 	stpMode?: SelfTradePreventionMode;
+	owner?: unknown;
+	meta?: unknown;
 }
 
 /**
@@ -176,6 +186,8 @@ export interface IStopLimitOrder {
 	isOCO: boolean;
 	accountId?: string;
 	stpMode?: SelfTradePreventionMode;
+	owner?: unknown;
+	meta?: unknown;
 }
 
 /**
@@ -194,6 +206,42 @@ export type StopOrderOptions =
 
 export type IStopOrder = IStopLimitOrder | IStopMarketOrder;
 export type IOrder = ILimitOrder | IStopOrder;
+
+/**
+ * A single execution between a resting (maker) and an incoming (taker) order.
+ * Self-trade prevention never produces a trade.
+ */
+export interface Trade {
+	/** Unique (per book) trade identifier. */
+	tradeId: string;
+	/** Id of the resting order. */
+	makerOrderId: string;
+	/** Id of the incoming order (for activated stop orders, the stop order id). */
+	takerOrderId: string;
+	/** Aggressor side (the side of the taker). */
+	side: Side;
+	/** Execution price (the maker's price). */
+	price: number;
+	/** Executed size. */
+	size: number;
+	/** Time of execution, from the book clock. */
+	timestamp: number;
+	/** Monotonic per-book sequence number. */
+	seq: number;
+	makerAccountId?: string;
+	takerAccountId?: string;
+	makerOwner?: unknown;
+	takerOwner?: unknown;
+	makerMeta?: unknown;
+	takerMeta?: unknown;
+}
+
+/** A price level with total size and number of resting orders. */
+export interface DepthLevel {
+	price: number;
+	size: number;
+	count: number;
+}
 
 /**
  * Represents the result of processing an order.
@@ -215,6 +263,14 @@ export interface IProcessOrder {
 	log?: JournalLog;
 	/** Orders expired due to Self-Trade Prevention (STP). */
 	stpExpired?: IOrder[];
+	/**
+	 * Executions generated while processing the order (including those of
+	 * activated stop orders), in match order. Present even when `err` is set,
+	 * as executions that already happened cannot be undone.
+	 */
+	trades: Trade[];
+	/** Book sequence number assigned to the operation (lower than the seq of its trades). */
+	seq: number;
 }
 
 export interface ConditionOrderOptions {
@@ -379,6 +435,10 @@ export interface OrderBookOptions {
 	enableJournaling?: boolean;
 	/** Array of journal logs. */
 	journal?: JournalLog[];
+	/** Time source used for orders, trades, journal logs and snapshots. Defaults to `Date.now`. */
+	clock?: () => number;
+	/** Called synchronously for each trade after the operation has been applied. Not called during journal replay. */
+	onTrade?: (trade: Trade) => void;
 }
 
 /**
@@ -433,5 +493,7 @@ export interface Snapshot {
 	ts: number;
 	/** The id of the last operation inserted in the orderbook */
 	lastOp: number;
+	/** Book sequence number at snapshot time */
+	seq?: number;
 }
 /* node:coverage enable */

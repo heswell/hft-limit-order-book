@@ -1,14 +1,13 @@
 {
   "git": {
-    "commitMessage": "chore(release): hft-limit-order-book@${version}",
+    "commitMessage": "chore(release): @heswell/hft-limit-order-book@${version}",
     "tagName": "v${version}",
     "tagAnnotation": "Release v${version}",
     "requireCommits": true,
     "requireCleanWorkingDir": true
   },
   "github": {
-    "release": true,
-    "releaseName": "v${version}",
+    "release": false,
     "commitArgs": ["-S"],
     "tagArgs": ["-s"]
   },

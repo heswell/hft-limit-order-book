@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0](https://github.com/heswell/hft-limit-order-book/releases/tag/v1.0.0)
+
+First release of `@heswell/hft-limit-order-book`, a fork of [fasenderos/nodejs-order-book](https://github.com/fasenderos/nodejs-order-book) v10.1.1 (history below is upstream's).
+
+### Features
+
+* trade records (`trades` on results, `onTrade` callback), monotonic per-book `seq`
+* injectable `clock`
+* opaque `owner` / `meta` on orders, snapshots and trades
+* optional `id` on market orders
+* `depth(levels?)` and `depthDetailed(levels?)`
+
 ## [10.1.1](https://github.com/fasenderos/nodejs-order-book/compare/v10.1.0...v10.1.1) (2026-06-27)
 
 ## [10.1.0](https://github.com/fasenderos/nodejs-order-book/compare/v10.0.1...v10.1.0) (2026-06-27)

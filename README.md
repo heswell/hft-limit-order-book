@@ -1,10 +1,9 @@
 <p align="center">
-    <a href="https://www.npmjs.com/package/nodejs-order-book" target="_blank"><img src="https://img.shields.io/npm/v/nodejs-order-book?color=blue" alt="NPM Version"></a>
-    <a href="https://github.com/fasenderos/nodejs-order-book/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/npm/l/nodejs-order-book" alt="Package License"></a>
-    <a href="https://www.npmjs.com/package/nodejs-order-book" target="_blank"><img src="https://img.shields.io/npm/dm/nodejs-order-book" alt="NPM Downloads"></a>
-    <a href="https://circleci.com/gh/fasenderos/nodejs-order-book" target="_blank"><img src="https://img.shields.io/circleci/build/github/fasenderos/nodejs-order-book/main" alt="CircleCI" ></a>
-    <a href="https://codecov.io/github/fasenderos/nodejs-order-book" target="_blank"><img src="https://img.shields.io/codecov/c/github/fasenderos/nodejs-order-book" alt="Codecov"></a>
-    <a href="https://github.com/fasenderos/nodejs-order-book"><img src="https://badgen.net/badge/icon/typescript?icon=typescript&label" alt="Built with TypeScript"></a>
+    <a href="https://www.npmjs.com/package/@heswell/hft-limit-order-book" target="_blank"><img src="https://img.shields.io/npm/v/@heswell/hft-limit-order-book?color=blue" alt="NPM Version"></a>
+    <a href="https://github.com/heswell/hft-limit-order-book/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/npm/l/@heswell/hft-limit-order-book" alt="Package License"></a>
+    <a href="https://www.npmjs.com/package/@heswell/hft-limit-order-book" target="_blank"><img src="https://img.shields.io/npm/dm/@heswell/hft-limit-order-book" alt="NPM Downloads"></a>
+        <a href="https://codecov.io/github/heswell/hft-limit-order-book" target="_blank"><img src="https://img.shields.io/codecov/c/github/heswell/hft-limit-order-book" alt="Codecov"></a>
+    <a href="https://github.com/heswell/hft-limit-order-book"><img src="https://badgen.net/badge/icon/typescript?icon=typescript&label" alt="Built with TypeScript"></a>
 </p>
 
 # Node.js Order Book
@@ -61,7 +60,7 @@ Designed for trading systems, exchanges, and HFT simulations. </br></br>
 ## Quick Start
 
 ```ts
-import { OrderBook, Side } from 'nodejs-order-book'
+import { OrderBook, Side } from '@heswell/hft-limit-order-book'
 
 const ob = new OrderBook()
 
@@ -85,20 +84,55 @@ console.log(result.partial)  // Partial fill, if any
 Install with npm:
 
 ```
-npm install nodejs-order-book
+npm install @heswell/hft-limit-order-book
 ```
 
 Install with yarn:
 
 ```
-yarn add nodejs-order-book
+yarn add @heswell/hft-limit-order-book
+```
+
+Install with bun:
+
+```bash
+bun add @heswell/hft-limit-order-book
 ```
 
 Install with pnpm:
 
 ```
-pnpm add nodejs-order-book
+pnpm add @heswell/hft-limit-order-book
 ```
+
+> **Fork notice.** `@heswell/hft-limit-order-book` is a fork of [fasenderos/nodejs-order-book](https://github.com/fasenderos/nodejs-order-book) v10.1.1 (Copyright Andrea Fassina, MIT), published separately to add simulator-oriented features. Everything in upstream (stop/OCO orders, post-only, STP, journaling, snapshots) is kept.
+
+## Fork additions
+
+```ts
+import { OrderBook, Side, type Trade } from '@heswell/hft-limit-order-book'
+
+let t = 0
+const ob = new OrderBook({
+  clock: () => ++t,                       // injectable time source (orders, trades, journal, snapshot)
+  onTrade: (trade: Trade) => console.log(trade), // called once per execution, after the operation is applied
+})
+ob.limit({ side: Side.SELL, id: 's1', size: 5, price: 100, owner: 'alice', meta: { bot: 1 } })
+const res = ob.market({ side: Side.BUY, id: 'm1', size: 2, owner: 'bob' })
+res.trades // Trade[]
+res.seq    // sequence number of the operation
+ob.depth(5)         // [asks, bids] as [price, size][], at most 5 levels per side
+ob.depthDetailed(5) // [asks, bids] as { price, size, count }[]
+```
+
+- `IProcessOrder.trades: Trade[]` – executions in match order (including stop orders activated by the operation). Self-trade-prevention expirations are not trades.
+- `Trade = { tradeId, makerOrderId, takerOrderId, side (aggressor), price (maker price), size, timestamp, seq, makerAccountId?, takerAccountId?, makerOwner?, takerOwner?, makerMeta?, takerMeta? }`
+- `IProcessOrder.seq` and `ob.seq` – monotonic per-book sequence number, shared by operations and trades (the operation's seq is lower than its trades'). Invalid operations do not consume a number. It is stored in snapshots.
+- `onTrade` is not invoked while replaying a journal.
+- `clock?: () => number` – replaces every `Date.now()`.
+- `owner` / `meta` – opaque values accepted on all order types, kept on orders, snapshots and trades, and preserved by `modify`.
+- `market({ id })` – optional id (generated as `mkt-<seq>` if absent; rejected if already used by a resting order).
+- `depth(levels?)` / `depthDetailed(levels?)` – best levels first (asks ascending, bids descending).
 
 ## Usage
 
@@ -106,16 +140,16 @@ The package supports both **ESM** and **CommonJS**:
 
 ```ts
 // ESM (recommended)
-import { OrderBook, Side, OrderType, SelfTradePreventionMode } from 'nodejs-order-book'
+import { OrderBook, Side, OrderType, SelfTradePreventionMode } from '@heswell/hft-limit-order-book'
 
 // CommonJS
-const { OrderBook, Side, OrderType, SelfTradePreventionMode } = require('nodejs-order-book')
+const { OrderBook, Side, OrderType, SelfTradePreventionMode } = require('@heswell/hft-limit-order-book')
 ```
 
 To start using the order book you need to import `OrderBook` and create a new instance:
 
 ```ts
-import { OrderBook } from 'nodejs-order-book'
+import { OrderBook } from '@heswell/hft-limit-order-book'
 
 const ob = new OrderBook()
 ```
@@ -158,7 +192,7 @@ ob.cancel(orderID: string)
 `Stop Market`, `Stop Limit` and `OCO` orders are supported.
 
 ```ts
-import { OrderBook } from 'nodejs-order-book'
+import { OrderBook } from '@heswell/hft-limit-order-book'
 
 const ob = new OrderBook()
 
@@ -646,7 +680,7 @@ The STP mode of the **taker** order always takes precedence — the mode stored 
 Add `accountId` and `stpMode` to any order:
 
 ```ts
-import { OrderBook, SelfTradePreventionMode, Side } from 'nodejs-order-book'
+import { OrderBook, SelfTradePreventionMode, Side } from '@heswell/hft-limit-order-book'
 
 const ob = new OrderBook()
 
@@ -687,7 +721,7 @@ When STP is triggered, the response (`IProcessOrder`) includes:
 STP rejections return error code `1202`:
 
 ```ts
-import { ErrorCodes } from 'nodejs-order-book'
+import { ErrorCodes } from '@heswell/hft-limit-order-book'
 
 assert.equal(result.err?.code, ErrorCodes.STP_TRIGGERED)
 // → 1202

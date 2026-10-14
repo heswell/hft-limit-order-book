@@ -12,7 +12,7 @@ const nodeBuiltins = new Set(
 // consume the package, and fails on any Node-only import.
 void test("browser bundle of the entry point has no node: or builtin imports", async () => {
 	const result = await build({
-		entryPoints: [resolve(import.meta.dirname, "../src/index.ts")],
+		entryPoints: [resolve(__dirname, "../src/index.ts")],
 		bundle: true,
 		platform: "browser",
 		format: "esm",

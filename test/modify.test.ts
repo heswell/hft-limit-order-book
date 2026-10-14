@@ -9,6 +9,7 @@ import {
 	type Trade,
 } from "../src";
 import { ErrorCodes } from "../src/errors";
+import type { JournalLog } from "../src/types";
 
 const mk = (opts = {}) => {
 	let t = 1000;
@@ -317,8 +318,8 @@ describe("modify invalid input", () => {
 describe("modify journal and snapshot", () => {
 	it("replaying the journal reproduces queue order and sizes", () => {
 		const ob = mk({ enableJournaling: true });
-		const journal = [];
-		const push = (r: { log?: unknown }) => {
+		const journal: JournalLog[] = [];
+		const push = (r: { log?: JournalLog }) => {
 			if (r.log) journal.push(r.log);
 		};
 		push(ob.limit({ side: Side.BUY, id: "a", size: 10, price: 100 }));
@@ -332,7 +333,6 @@ describe("modify journal and snapshot", () => {
 		push(ob.modify("c", { price: 99 }));
 		assert.deepEqual(queueAt(ob, Side.BUY, 100), ["a", "b"]);
 
-		// @ts-expect-error journal entries are JournalLog
 		const replayed = mk({ journal });
 		assert.deepEqual(queueAt(replayed, Side.BUY, 100), ["a", "b"]);
 		assert.deepEqual(queueAt(replayed, Side.BUY, 99), ["c"]);

@@ -78,6 +78,12 @@ export class OrderQueue {
 		}
 	};
 
+	// Changes the size of an order in place, keeping its time and queue position
+	resizeInPlace = (order: LimitOrder, size: number): void => {
+		this._volume += size - order.size;
+		order.size = size;
+	};
+
 	updateOrderSize = (
 		order: LimitOrder,
 		size: number,

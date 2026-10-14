@@ -271,6 +271,12 @@ export interface IProcessOrder {
 	trades: Trade[];
 	/** Book sequence number assigned to the operation (lower than the seq of its trades). */
 	seq: number;
+	/**
+	 * Set only by a successful `modify`. `true` when the order kept its place in
+	 * the queue (size decrease, or no change, at the same price); `false` when it
+	 * was re-entered at the back of its (possibly new) price level.
+	 */
+	priorityKept?: boolean;
 }
 
 export interface ConditionOrderOptions {
@@ -283,8 +289,8 @@ export interface ConditionOrderOptions {
 export interface ModifyOrderOptions {
 	/** Unique identifier of the order. */
 	orderID: string;
-	/** Details of the order update (price or size). */
-	orderUpdate: OrderUpdatePrice | OrderUpdateSize;
+	/** Details of the order update (price and/or size). */
+	orderUpdate: OrderUpdate;
 }
 
 /**
@@ -459,6 +465,17 @@ export interface OrderUpdateSize {
 	price?: number;
 	/** New size of the order. */
 	size: number;
+}
+
+/**
+ * Update passed to `modify`. At least one of `price` or `size` must be set,
+ * otherwise `modify` returns `INVALID_PRICE_OR_QUANTITY`.
+ */
+export interface OrderUpdate {
+	/** New limit price. */
+	price?: number;
+	/** New open (resting) size of the order. */
+	size?: number;
 }
 
 /**

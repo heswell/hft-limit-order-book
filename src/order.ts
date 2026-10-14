@@ -1,5 +1,4 @@
 /* node:coverage ignore next - Don't know why first and last line of each file count as uncovered */
-import { randomUUID } from "node:crypto";
 import { CustomError, ERROR } from "./errors";
 import {
 	type ILimitOrder,
@@ -14,7 +13,7 @@ import {
 	type Side,
 	type TimeInForce,
 } from "./types";
-import { safeStringify } from "./utils";
+import { randomUUID, safeStringify } from "./utils";
 
 abstract class BaseOrder {
 	readonly _id: string;

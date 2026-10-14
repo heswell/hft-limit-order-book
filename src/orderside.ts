@@ -120,6 +120,32 @@ export class OrderSide {
 		return oldOrder;
 	};
 
+	// Replaces the head order of its price level (partial fill)
+	replaceHead = (oldOrder: LimitOrder, newOrder: LimitOrder): void => {
+		const queue = this._prices[oldOrder.price.toString()];
+		if (queue === undefined) {
+			throw CustomError(ERROR.INVALID_PRICE_LEVEL);
+		}
+		this._volume += newOrder.size - oldOrder.size;
+		this._total +=
+			newOrder.size * newOrder.price - oldOrder.size * oldOrder.price;
+		queue.update(oldOrder, newOrder);
+	};
+
+	// Changes the size of a resting order in place (same price), so it keeps
+	// its time priority. Used for size decreases.
+	resizeInPlace = (order: LimitOrder, size: number): LimitOrder => {
+		const queue = this._prices[order.price.toString()];
+		if (queue === undefined) {
+			throw CustomError(ERROR.INVALID_PRICE_LEVEL);
+		}
+		const delta = size - order.size;
+		this._volume += delta;
+		this._total += delta * order.price;
+		queue.resizeInPlace(order, size);
+		return order;
+	};
+
 	// returns max level of price
 	maxPriceQueue = (): OrderQueue | undefined => {
 		if (this._depthSide > 0) {

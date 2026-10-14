@@ -136,7 +136,7 @@ ob.depthDetailed(5) // [asks, bids] as { price, size, count }[]
 
 ## Usage
 
-The package supports both **ESM** and **CommonJS**:
+The package supports both **ESM** and **CommonJS**, and has no Node-only imports, so it can be bundled for the browser. Generated ids use `globalThis.crypto.randomUUID()` (Node >= 19, Bun, Deno and browsers), with a fallback when Web Crypto is not available.
 
 ```ts
 // ESM (recommended)
@@ -179,9 +179,8 @@ ob.limit({
 ob.market({ side: 'buy' | 'sell', size: number })
 
 ob.modify(orderID: string, {
-      side: 'buy' | 'sell',
-      size: number,
-      price: number
+      size?: number,
+      price?: number
 })
 
 ob.cancel(orderID: string)
@@ -476,15 +475,20 @@ ob.oco({
 
 ### modify()
 
-Modify an existing order by ID. When an order is modified (price or quantity), it is treated as a new entry: under price-time-priority, it moves to the back of the matching queue.
+Modify the price and/or open size of a resting limit order by ID. Time priority follows exchange rules:
+
+- **Size decrease (or no change) at the same price** – the order is amended in place and keeps its queue position and `time`.
+- **Price change or size increase** – the order loses priority: it is re-entered as the newest order at its (possibly new) price, so it goes to the back of that level, and it trades if the new price crosses the book.
+
+`response.priorityKept` is `true` or `false` accordingly (set only when the modify succeeds). `timeInForce`, `postOnly`, `stpMode`, `accountId`, `owner`, `meta` and an OCO link are preserved. A `postOnly` order whose new price would cross is rejected with `LIMIT_ORDER_POST_ONLY` and left unchanged. `size` is the new open quantity and must be greater than zero (use `cancel()` to remove an order). Missing, non-finite or non-positive values return `INVALID_PRICE_OR_QUANTITY` and leave the order unchanged.
 
 ```ts
 /**
  * @param orderID - The ID of the order to modify
- * @param orderUpdate - An object with `{size, price}`. Only provided fields are updated
+ * @param orderUpdate - `{ size?, price? }`, at least one is required. Only provided fields are updated
  * @returns An object with the result or an error
  */
-ob.modify(orderID: string, { size: number, price: number })
+ob.modify(orderID: string, { size?: number, price?: number })
 ```
 
 For example:
@@ -852,7 +856,7 @@ ob.createOrder({
 - If no `accountId` is specified on either side, STP is **not** triggered (backward compatible).
 - If no `stpMode` is specified, it defaults to `NONE` (no prevention).
 - Stop market and stop limit orders preserve the `stpMode` and apply it when triggered.
-- Modify operations reset `stpMode` to `NONE`.
+- Modify operations preserve `stpMode` and apply it if a re-priced order crosses the book.
 
 ## Order Book Options
 

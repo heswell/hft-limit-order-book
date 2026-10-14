@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { ErrorCodes, ErrorMessages } from "../src/errors";
 import {
@@ -408,17 +407,14 @@ void test("it should create order without passing a date or id", (t) => {
 	const fakeTimestamp = 1487076708000;
 	const fakeId = "some-uuid";
 	const { now } = Date;
-	const originalRandomUUID = randomUUID;
 
 	t.after(() => (Date.now = now));
-	// @ts-expect-error cannot assign because is readonly
-	// biome-ignore lint: we need to mock the returned value
-	t.after(() => (randomUUID = originalRandomUUID));
-
 	Date.now = (..._m) => fakeTimestamp;
-	// @ts-expect-error cannot assign because is readonly
-	// biome-ignore lint: we need to mock the returned value
-	randomUUID = () => fakeId;
+	t.mock.method(
+		globalThis.crypto,
+		"randomUUID",
+		() => fakeId as ReturnType<Crypto["randomUUID"]>,
+	);
 
 	const type = OrderType.STOP_MARKET;
 	const side = Side.BUY;

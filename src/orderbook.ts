@@ -22,8 +22,7 @@ import {
 	type OCOOrderOptions,
 	type OrderBookOptions,
 	OrderType,
-	type OrderUpdatePrice,
-	type OrderUpdateSize,
+	type OrderUpdate,
 	SelfTradePreventionMode,
 	Side,
 	type Snapshot,
@@ -290,18 +289,33 @@ export class OrderBook {
 	};
 
 	/**
-	 * Modify an existing order with given ID. When an order is modified by price or quantity,
-	 * it will be deemed as a new entry. Under the price-time-priority algorithm, orders are
-	 * prioritized according to their order price and order time. Hence, the latest orders
-	 * will be placed at the back of the matching order queue.
+	 * Modify the price and/or open size of a resting limit order, following
+	 * exchange price-time priority rules:
+	 *
+	 * - Size decrease (or no change) at the same price: the order is amended in
+	 *   place and keeps its time priority (queue position and `time`).
+	 * - Price change or size increase: the order loses priority. It is removed
+	 *   and re-entered as the newest order at its (possibly new) price, so it goes
+	 *   to the back of that level, and it may trade if the new price crosses the
+	 *   book.
+	 *
+	 * `timeInForce`, `postOnly`, `stpMode`, `accountId`, `owner`, `meta` and any
+	 * OCO link are preserved. A `postOnly` order whose new price would cross is
+	 * rejected with `LIMIT_ORDER_POST_ONLY` and left unchanged.
+	 *
+	 * `size` is the new open quantity and must be greater than zero; use
+	 * {@link cancel} to remove an order. Missing, non-finite or non-positive
+	 * values return `INVALID_PRICE_OR_QUANTITY` and leave the order unchanged.
+	 *
+	 * On success `response.priorityKept` tells which of the two cases applied.
 	 *
 	 * @param orderID - The ID of the order to be modified
-	 * @param orderUpdate - An object with the modified size and/or price of an order. The shape of the object is `{size, price}`.
+	 * @param orderUpdate - `{ price?, size? }`, at least one of them is required
 	 * @returns An object with the result of the processed order or an error
 	 */
 	public modify = (
 		orderID: string,
-		orderUpdate: OrderUpdatePrice | OrderUpdateSize,
+		orderUpdate: OrderUpdate,
 	): IProcessOrder => {
 		const order = this.orders[orderID];
 		if (order === undefined) {
@@ -309,42 +323,90 @@ export class OrderBook {
 			response.err = CustomError(ERROR.ORDER_NOT_FOUND);
 			return response;
 		}
-		if (orderUpdate?.price !== undefined || orderUpdate?.size !== undefined) {
-			const newPrice = orderUpdate.price ?? order.price;
-			const newSize = orderUpdate.size ?? order.size;
-			if (newPrice > 0 && newSize > 0) {
-				this._now = this.clock();
-				const response = this.getProcessOrderResponse(newSize);
-				response.seq = this.nextSeq();
-				this._cancelOrder(order.id, true);
-				this.createLimitOrder(
-					response,
-					order.side,
-					order.id,
-					newSize,
-					newPrice,
-					order.postOnly,
-					TimeInForce.GTC,
-					undefined,
-					order.accountId,
-					SelfTradePreventionMode.NONE,
-					{ owner: order.owner, meta: order.meta },
-				);
-				if (this.enableJournaling) {
-					response.log = {
-						opId: ++this._lastOp,
-						ts: this._now,
-						op: "u",
-						o: { orderID, orderUpdate },
-					};
-				}
-				return this.finalize(response);
+		const price = orderUpdate?.price;
+		const size = orderUpdate?.size;
+		if (
+			(price === undefined && size === undefined) ||
+			!this.isValidUpdateValue(price) ||
+			!this.isValidUpdateValue(size)
+		) {
+			const response = this.getProcessOrderResponse(
+				typeof size === "number" ? size : 0,
+			);
+			response.err = CustomError(ERROR.INVALID_PRICE_OR_QUANTITY);
+			return response;
+		}
+		const newPrice = price ?? order.price;
+		const newSize = size ?? order.size;
+		const priorityKept = newPrice === order.price && newSize <= order.size;
+		if (
+			!priorityKept &&
+			order.postOnly &&
+			this.wouldCross(order.side, newPrice)
+		) {
+			const response = this.getProcessOrderResponse(newSize);
+			response.err = CustomError(ERROR.LIMIT_ORDER_POST_ONLY);
+			return response;
+		}
+
+		this._now = this.clock();
+		const response = this.getProcessOrderResponse(newSize);
+		response.seq = this.nextSeq();
+		if (priorityKept) {
+			if (newSize !== order.size) {
+				const side = order.side === Side.BUY ? this.bids : this.asks;
+				side.resizeInPlace(order, newSize);
+			}
+		} else {
+			const ocoStopPrice = order.ocoStopPrice;
+			this._cancelOrder(order.id, true);
+			this.createLimitOrder(
+				response,
+				order.side,
+				order.id,
+				newSize,
+				newPrice,
+				order.postOnly,
+				order.timeInForce,
+				ocoStopPrice,
+				order.accountId,
+				order.stpMode,
+				{ owner: order.owner, meta: order.meta },
+			);
+			// As for a resting OCO limit that trades, the linked stop is cancelled
+			// once the limit leg trades or leaves the book (unless it was the stop
+			// itself that got activated by this operation).
+			if (
+				ocoStopPrice !== undefined &&
+				(this.orders[orderID] === undefined ||
+					response.trades.some((t) => t.takerOrderId === orderID)) &&
+				!response.activated.some((o) => o.id === orderID)
+			) {
+				this.stopBook.remove(order.side, orderID, ocoStopPrice);
 			}
 		}
-		// Missing one of price and/or size, or the provided ones are not greater than zero
-		const response = this.getProcessOrderResponse(orderUpdate?.size ?? 0);
-		response.err = CustomError(ERROR.INVALID_PRICE_OR_QUANTITY);
-		return response;
+		if (response.err === null) response.priorityKept = priorityKept;
+		if (this.enableJournaling) {
+			response.log = {
+				opId: ++this._lastOp,
+				ts: this._now,
+				op: "u",
+				o: { orderID, orderUpdate },
+			};
+		}
+		return this.finalize(response);
+	};
+
+	private readonly isValidUpdateValue = (value: unknown): boolean =>
+		value === undefined ||
+		(typeof value === "number" && Number.isFinite(value) && value > 0);
+
+	// Tells whether a limit order at `price` would trade against the opposite side
+	private readonly wouldCross = (side: Side, price: number): boolean => {
+		const best =
+			side === Side.BUY ? this.asks.minPriceQueue() : this.bids.maxPriceQueue();
+		if (best === undefined) return false;
+		return side === Side.BUY ? price >= best.price() : price <= best.price();
 	};
 
 	/**
@@ -1196,7 +1258,10 @@ export class OrderBook {
 						response.partial = partial.toObject();
 						this.orders[headOrder.id] = partial;
 						response.partialQuantityProcessed = response.quantityLeft;
-						orderQueue.update(headOrder, partial);
+						(headOrder.side === Side.BUY ? this.bids : this.asks).replaceHead(
+							headOrder,
+							partial,
+						);
 						response.quantityLeft = 0;
 					} else {
 						record(headOrder, headOrder.size);

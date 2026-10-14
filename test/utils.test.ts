@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
-import { safeParse, safeStringify } from "../src/utils";
+import { randomUUID, safeParse, safeStringify } from "../src/utils";
 
 describe("safeStringify", () => {
 	test("should stringify a valid object", () => {
@@ -57,5 +57,52 @@ describe("safeParse", () => {
 		const jsonStr = "[1,2,3]";
 		const result = safeParse(jsonStr);
 		assert.deepStrictEqual(result, [1, 2, 3]);
+	});
+});
+
+describe("randomUUID", () => {
+	const UUID_V4 =
+		/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+	test("uses globalThis.crypto.randomUUID when available", (t) => {
+		const mock = t.mock.method(globalThis.crypto, "randomUUID");
+		assert.match(randomUUID(), UUID_V4);
+		assert.equal(mock.mock.callCount(), 1);
+	});
+
+	// globalThis.crypto is a getter in Node, so swap the property descriptor
+	const withCrypto = (
+		t: { after: (fn: () => void) => void },
+		value: unknown,
+	): void => {
+		const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+		Object.defineProperty(globalThis, "crypto", {
+			value,
+			configurable: true,
+			writable: true,
+		});
+		t.after(() => {
+			if (original) Object.defineProperty(globalThis, "crypto", original);
+		});
+	};
+
+	test("falls back to getRandomValues without randomUUID", (t) => {
+		const getRandomValues = globalThis.crypto.getRandomValues.bind(
+			globalThis.crypto,
+		);
+		withCrypto(t, { getRandomValues });
+		const ids = new Set<string>();
+		for (let i = 0; i < 100; i++) {
+			const id = randomUUID();
+			assert.match(id, UUID_V4);
+			ids.add(id);
+		}
+		assert.equal(ids.size, 100);
+	});
+
+	test("falls back to Math.random without Web Crypto", (t) => {
+		withCrypto(t, undefined);
+		assert.match(randomUUID(), UUID_V4);
+		assert.notEqual(randomUUID(), randomUUID());
 	});
 });
